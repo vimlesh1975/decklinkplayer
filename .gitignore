@@ -1,8 +1,8 @@
-bin/
 obj/
 .dotnet/
 .vs/
 logs/
+bin/**/logs/
 *.log
 *.out
 *.s16le
