@@ -1,0 +1,39 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <BuildTimestamp>$([System.DateTime]::Now.ToString('ddMMyy_HHmmss'))</BuildTimestamp>
+    <TimestampedExeName>$(AssemblyName)_$(BuildTimestamp).exe</TimestampedExeName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="DeckLinkAPI.Interop">
+      <HintPath>Interop\DeckLinkAPI.Interop.dll</HintPath>
+      <Private>true</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="PrepareFreshTimestampedBuild" BeforeTargets="BeforeBuild">
+    <Exec
+      IgnoreExitCode="true"
+      Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference = 'SilentlyContinue'; $processes = @(Get-Process -Name '$(AssemblyName)*','ffmpeg'); if ($processes) { $processes | Stop-Process -Force; Start-Sleep -Milliseconds 500 }; $targetDir = '$(TargetDir)'; if (![string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) { Get-ChildItem -LiteralPath $targetDir -Filter '$(AssemblyName)*.exe' -File | Remove-Item -Force }&quot;" />
+    <Message Importance="high" Text="Closed running $(AssemblyName)/ffmpeg builds and removed old executables from $(TargetDir)" />
+  </Target>
+
+  <Target Name="CreateTimestampedExe" AfterTargets="Build" Condition="'$(OutputType)' == 'WinExe'">
+    <Copy
+      SourceFiles="$(TargetDir)$(AssemblyName).exe"
+      DestinationFiles="$(TargetDir)$(TimestampedExeName)" />
+    <Delete Files="$(TargetDir)$(AssemblyName).exe" />
+    <Message Importance="high" Text="Created timestamped executable: $(TargetDir)$(TimestampedExeName)" />
+  </Target>
+
+</Project>

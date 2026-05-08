@@ -1,0 +1,740 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using DeckLinkAPI;
+
+namespace ffmpegplayer;
+
+internal sealed class DeckLinkSdkPlayer
+{
+    private const int BytesPerPixelUyvy = 2;
+    private const int AudioSampleRate = 48000;
+    private const int AudioBytesPerSample = 4;
+    private const int AudioChunkSampleFrames = 1024;
+
+    public string FormatDecoderCommand(PlayRequest request)
+    {
+        var commands = new List<string>
+        {
+            "Video: " + FormatCommand(request.FfmpegPath, BuildVideoDecoderArguments(request)),
+        };
+
+        if (!request.NoAudio)
+        {
+            commands.Add("Audio: " + FormatCommand(request.FfmpegPath, BuildAudioDecoderArguments(request)));
+        }
+
+        return string.Join(Environment.NewLine, commands);
+    }
+
+    public async Task<ProcessResult> PlayAsync(
+        PlayRequest request,
+        Action<string>? logLine = null,
+        CancellationToken cancellationToken = default)
+    {
+        var mode = ResolveDisplayMode(request);
+        var deckLink = FindDeckLink(request.Device);
+        var output = (IDeckLinkOutput_v14_2_1)deckLink;
+
+        IDeckLinkDisplayMode displayModeInfo;
+        output.GetDisplayMode(mode.DisplayMode, out displayModeInfo);
+
+        var width = displayModeInfo.GetWidth();
+        var height = displayModeInfo.GetHeight();
+        displayModeInfo.GetFrameRate(out var frameDuration, out var timeScale);
+
+        var rowBytes = width * BytesPerPixelUyvy;
+        var frameBytes = checked(rowBytes * height);
+        var frameBuffer = new byte[frameBytes];
+        var outputLock = new object();
+
+        using var videoDecoder = StartVideoDecoder(request);
+        Process? audioDecoder = null;
+        var stderr = new List<string>();
+        var videoStderrTask = Task.Run(
+            () => PumpErrorAsync(videoDecoder, "video-decoder", stderr, logLine, cancellationToken),
+            cancellationToken);
+        Task? audioStderrTask = null;
+        Task? audioPumpTask = null;
+        var audioOutputEnabled = false;
+
+        var killedByCancellation = false;
+        using var cancellationRegistration = cancellationToken.Register(() =>
+        {
+            killedByCancellation = true;
+            TryKill(videoDecoder);
+            TryKill(audioDecoder);
+        });
+
+        try
+        {
+            output.EnableVideoOutput(mode.DisplayMode, _BMDVideoOutputFlags.bmdVideoOutputFlagDefault);
+            if (!request.NoAudio)
+            {
+                output.EnableAudioOutput(
+                    _BMDAudioSampleRate.bmdAudioSampleRate48kHz,
+                    _BMDAudioSampleType.bmdAudioSampleType32bitInteger,
+                    (uint)request.AudioChannels,
+                    _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
+
+                audioOutputEnabled = true;
+                audioDecoder = StartAudioDecoder(request);
+                audioStderrTask = Task.Run(
+                    () => PumpErrorAsync(audioDecoder, "audio-decoder", stderr, logLine, cancellationToken),
+                    cancellationToken);
+                audioPumpTask = Task.Run(
+                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, logLine, cancellationToken),
+                    cancellationToken);
+            }
+
+            var audioDescription = request.NoAudio
+                ? "video only"
+                : $"{request.AudioChannels}ch 32-bit PCM audio";
+            logLine?.Invoke($"DeckLink SDK output enabled: {request.Device}, {width}x{height}, {FormatRate(frameDuration, timeScale)} fps, {audioDescription}.");
+            logLine?.Invoke("FFmpeg is used only for decoding. DeckLink video/audio output is handled by the Blackmagic SDK.");
+
+            var frameNumber = 0L;
+            var stopwatch = Stopwatch.StartNew();
+            var frameTicks = Stopwatch.Frequency * frameDuration / timeScale;
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (!await ReadExactFrameAsync(videoDecoder.StandardOutput.BaseStream, frameBuffer, cancellationToken))
+                {
+                    break;
+                }
+
+                IDeckLinkMutableVideoFrame_v14_2_1? mutableFrame = null;
+                try
+                {
+                    output.CreateVideoFrame(
+                        width,
+                        height,
+                        rowBytes,
+                        _BMDPixelFormat.bmdFormat8BitYUV,
+                        _BMDFrameFlags.bmdFrameFlagDefault,
+                        out mutableFrame);
+
+                    mutableFrame.GetBytes(out var destination);
+                    Marshal.Copy(frameBuffer, 0, destination, frameBytes);
+
+                    lock (outputLock)
+                    {
+                        output.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
+                    }
+                }
+                finally
+                {
+                    ReleaseCom(mutableFrame);
+                }
+
+                frameNumber++;
+
+                if (frameNumber % 25 == 0)
+                {
+                    logLine?.Invoke($"sdk_frame={frameNumber}");
+                }
+
+                var targetTicks = frameNumber * frameTicks;
+                var remainingTicks = targetTicks - stopwatch.ElapsedTicks;
+                if (remainingTicks > 0)
+                {
+                    var delayMs = (int)Math.Min(remainingTicks * 1000 / Stopwatch.Frequency, 100);
+                    if (delayMs > 0)
+                    {
+                        await Task.Delay(delayMs, cancellationToken);
+                    }
+                }
+            }
+
+            TryKill(videoDecoder);
+            TryKill(audioDecoder);
+
+            await videoDecoder.WaitForExitAsync(CancellationToken.None);
+            if (audioDecoder is not null)
+            {
+                await audioDecoder.WaitForExitAsync(CancellationToken.None);
+                audioDecoder.Dispose();
+                audioDecoder = null;
+            }
+
+            await IgnoreCancellationAsync(videoStderrTask);
+            await IgnoreCancellationAsync(audioStderrTask);
+            await IgnoreCancellationAsync(audioPumpTask);
+
+            return new ProcessResult(videoDecoder.ExitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
+        }
+        finally
+        {
+            TryKill(audioDecoder);
+            if (audioDecoder is not null)
+            {
+                audioDecoder.Dispose();
+            }
+
+            if (audioOutputEnabled)
+            {
+                try
+                {
+                    output.FlushBufferedAudioSamples();
+                }
+                catch
+                {
+                    // Best effort cleanup when the card is already stopped.
+                }
+
+                try
+                {
+                    output.DisableAudioOutput();
+                }
+                catch
+                {
+                    // Best effort cleanup when the card is already stopped.
+                }
+            }
+
+            try
+            {
+                output.DisableVideoOutput();
+            }
+            catch
+            {
+                // Best effort cleanup when the card is already stopped.
+            }
+
+            ReleaseCom(output);
+            ReleaseCom(deckLink);
+        }
+    }
+
+    private static SdkDisplayMode ResolveDisplayMode(PlayRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.FormatCode) &&
+            ModeByCode.TryGetValue(request.FormatCode, out var modeByCode))
+        {
+            return modeByCode;
+        }
+
+        var width = 1920;
+        var height = 1080;
+        if (!string.IsNullOrWhiteSpace(request.VideoSize))
+        {
+            var parts = request.VideoSize.Split('x', 'X');
+            if (parts.Length == 2)
+            {
+                _ = int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out width);
+                _ = int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out height);
+            }
+        }
+
+        var modeCode = ResolveModeCodeFromGeometry(width, height, NormalizeRateCode(request.FrameRate), request.IsInterlaced);
+        if (modeCode is not null && ModeByCode.TryGetValue(modeCode, out var modeByGeometry))
+        {
+            return modeByGeometry;
+        }
+
+        throw new InvalidOperationException($"DeckLink SDK engine does not yet map mode '{request.FormatCode ?? request.VideoSize + " " + request.FrameRate}'.");
+    }
+
+    private static IDeckLink FindDeckLink(string requestedDevice)
+    {
+        var iterator = new CDeckLinkIteratorClass();
+        try
+        {
+            while (true)
+            {
+                IDeckLink deckLink;
+                try
+                {
+                    iterator.Next(out deckLink);
+                }
+                catch (COMException)
+                {
+                    break;
+                }
+
+                if (deckLink is null)
+                {
+                    break;
+                }
+
+                deckLink.GetDisplayName(out var displayName);
+                deckLink.GetModelName(out var modelName);
+
+                if (string.Equals(displayName, requestedDevice, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(modelName, requestedDevice, StringComparison.OrdinalIgnoreCase) ||
+                    displayName.Contains(requestedDevice, StringComparison.OrdinalIgnoreCase))
+                {
+                    return deckLink;
+                }
+
+                ReleaseCom(deckLink);
+            }
+        }
+        finally
+        {
+            ReleaseCom(iterator);
+        }
+
+        throw new InvalidOperationException($"DeckLink SDK device not found: {requestedDevice}");
+    }
+
+    private static Process StartVideoDecoder(PlayRequest request)
+    {
+        return StartDecoder(request.FfmpegPath, BuildVideoDecoderArguments(request));
+    }
+
+    private static Process StartAudioDecoder(PlayRequest request)
+    {
+        return StartDecoder(request.FfmpegPath, BuildAudioDecoderArguments(request));
+    }
+
+    private static Process StartDecoder(string ffmpegPath, IReadOnlyList<string> arguments)
+    {
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            },
+        };
+
+        foreach (var argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+
+        process.Start();
+        return process;
+    }
+
+    private static IReadOnlyList<string> BuildVideoDecoderArguments(PlayRequest request)
+    {
+        var isStillImage = IsImageFile(request.InputPath);
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-nostats",
+        };
+
+        if (request.Loop && !request.UseTestPattern && !isStillImage)
+        {
+            args.Add("-stream_loop");
+            args.Add("-1");
+        }
+
+        if (request.UseTestPattern)
+        {
+            args.Add("-f");
+            args.Add("lavfi");
+            args.Add("-i");
+            args.Add($"testsrc2=size={request.VideoSize ?? "1920x1080"}:rate={NormalizeRateString(request.FrameRate)}");
+        }
+        else
+        {
+            args.Add("-re");
+            if (isStillImage)
+            {
+                args.Add("-loop");
+                args.Add("1");
+                args.Add("-framerate");
+                args.Add(NormalizeRateString(request.FrameRate));
+            }
+
+            args.Add("-i");
+            args.Add(request.InputPath);
+        }
+
+        args.Add("-map");
+        args.Add("0:v:0");
+        args.Add("-an");
+        args.Add("-vf");
+        args.Add("format=uyvy422");
+
+        if (!string.IsNullOrWhiteSpace(request.FrameRate))
+        {
+            args.Add("-r");
+            args.Add(request.FrameRate);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.VideoSize))
+        {
+            args.Add("-s");
+            args.Add(request.VideoSize);
+        }
+
+        args.Add("-pix_fmt");
+        args.Add("uyvy422");
+        args.Add("-f");
+        args.Add("rawvideo");
+        args.Add("pipe:1");
+        return args;
+    }
+
+    private static IReadOnlyList<string> BuildAudioDecoderArguments(PlayRequest request)
+    {
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-nostats",
+        };
+
+        if (request.Loop && !request.UseTestPattern)
+        {
+            args.Add("-stream_loop");
+            args.Add("-1");
+        }
+
+        if (request.UseTestPattern)
+        {
+            args.Add("-f");
+            args.Add("lavfi");
+            args.Add("-i");
+            args.Add($"anullsrc=r={AudioSampleRate}:cl=stereo");
+        }
+        else
+        {
+            args.Add("-re");
+            args.Add("-i");
+            args.Add(request.InputPath);
+        }
+
+        args.Add("-map");
+        args.Add("0:a:0");
+        args.Add("-vn");
+        args.Add("-ac");
+        args.Add(request.AudioChannels.ToString(CultureInfo.InvariantCulture));
+        args.Add("-ar");
+        args.Add(AudioSampleRate.ToString(CultureInfo.InvariantCulture));
+        args.Add("-sample_fmt");
+        args.Add("s32");
+        args.Add("-f");
+        args.Add("s32le");
+        args.Add("pipe:1");
+        return args;
+    }
+
+    private static async Task<bool> ReadExactFrameAsync(Stream stream, byte[] buffer, CancellationToken cancellationToken)
+    {
+        var offset = 0;
+        while (offset < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(offset, buffer.Length - offset), cancellationToken);
+            if (read == 0)
+            {
+                return false;
+            }
+
+            offset += read;
+        }
+
+        return true;
+    }
+
+    private static async Task PumpErrorAsync(
+        Process process,
+        string prefix,
+        List<string> stderr,
+        Action<string>? logLine,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (await process.StandardError.ReadLineAsync(cancellationToken) is { } line)
+            {
+                lock (stderr)
+                {
+                    stderr.Add($"{prefix}: {line}");
+                }
+
+                logLine?.Invoke($"{prefix}: {line}");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during Stop.
+        }
+    }
+
+    private static async Task PumpAudioAsync(
+        IDeckLinkOutput_v14_2_1 output,
+        object outputLock,
+        Process audioDecoder,
+        int channels,
+        Action<string>? logLine,
+        CancellationToken cancellationToken)
+    {
+        var bytesPerSampleFrame = checked(channels * AudioBytesPerSample);
+        var bufferBytes = checked(AudioChunkSampleFrames * bytesPerSampleFrame);
+        var managedBuffer = new byte[bufferBytes];
+        var unmanagedBuffer = Marshal.AllocHGlobal(bufferBytes);
+        var totalWritten = 0L;
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var bytesRead = await ReadAlignedAudioBlockAsync(
+                    audioDecoder.StandardOutput.BaseStream,
+                    managedBuffer,
+                    bytesPerSampleFrame,
+                    cancellationToken);
+
+                if (bytesRead <= 0)
+                {
+                    break;
+                }
+
+                var sampleFrameCount = bytesRead / bytesPerSampleFrame;
+                Marshal.Copy(managedBuffer, 0, unmanagedBuffer, bytesRead);
+
+                uint written;
+                lock (outputLock)
+                {
+                    output.WriteAudioSamplesSync(unmanagedBuffer, (uint)sampleFrameCount, out written);
+                }
+                if (written != sampleFrameCount)
+                {
+                    logLine?.Invoke($"sdk_audio_short_write requested={sampleFrameCount} written={written}");
+                }
+
+                var previousTotal = totalWritten;
+                totalWritten += written;
+                if (totalWritten / AudioSampleRate != previousTotal / AudioSampleRate)
+                {
+                    logLine?.Invoke($"sdk_audio_samples={totalWritten}");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during Stop.
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(unmanagedBuffer);
+        }
+    }
+
+    private static async Task<int> ReadAlignedAudioBlockAsync(
+        Stream stream,
+        byte[] buffer,
+        int bytesPerSampleFrame,
+        CancellationToken cancellationToken)
+    {
+        var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+        while (bytesRead > 0 && bytesRead % bytesPerSampleFrame != 0 && bytesRead < buffer.Length)
+        {
+            var needed = Math.Min(bytesPerSampleFrame - bytesRead % bytesPerSampleFrame, buffer.Length - bytesRead);
+            var extra = await stream.ReadAsync(buffer.AsMemory(bytesRead, needed), cancellationToken);
+            if (extra == 0)
+            {
+                break;
+            }
+
+            bytesRead += extra;
+        }
+
+        return bytesRead - bytesRead % bytesPerSampleFrame;
+    }
+
+    private static async Task IgnoreCancellationAsync(Task? task)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task;
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during Stop.
+        }
+    }
+
+    private static void TryKill(Process? process)
+    {
+        try
+        {
+            if (process is not null && !process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Best effort while stopping.
+        }
+    }
+
+    private static void ReleaseCom(object? value)
+    {
+        if (value is not null && Marshal.IsComObject(value))
+        {
+            Marshal.ReleaseComObject(value);
+        }
+    }
+
+    private static string NormalizeRateCode(string? frameRate)
+    {
+        return NormalizeRateString(frameRate) switch
+        {
+            "24000/1001" or "23.98" or "23.976" => "2398",
+            "24" or "24000/1000" => "24",
+            "25" or "25000/1000" => "25",
+            "30000/1001" or "29.97" or "29.970" => "2997",
+            "30" or "30000/1000" => "30",
+            "50" or "50000/1000" => "50",
+            "60000/1001" or "59.94" or "59.940" => "5994",
+            "60" or "60000/1000" => "60",
+            _ => "25",
+        };
+    }
+
+    private static string NormalizeRateString(string? frameRate)
+    {
+        return string.IsNullOrWhiteSpace(frameRate) ? "25" : frameRate;
+    }
+
+    private static string FormatRate(long frameDuration, long timeScale)
+    {
+        return (timeScale / (double)frameDuration).ToString("0.###", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatCommand(string fileName, IReadOnlyList<string> arguments)
+    {
+        return string.Join(" ", new[] { Quote(fileName) }.Concat(arguments.Select(Quote)));
+    }
+
+    private static bool IsImageFile(string path)
+    {
+        return ImageExtensions.Contains(Path.GetExtension(path));
+    }
+
+    private static string Quote(string value)
+    {
+        return value.Any(char.IsWhiteSpace) || value.Contains('"')
+            ? $"\"{value.Replace("\"", "\\\"", StringComparison.Ordinal)}\""
+            : value;
+    }
+
+    private static string? ResolveModeCodeFromGeometry(int width, int height, string rateCode, bool isInterlaced)
+    {
+        return (width, height, rateCode, isInterlaced) switch
+        {
+            (720, 486, _, _) => "ntsc",
+            (720, 576, _, _) => "pal",
+
+            (1280, 720, "50", _) => "hp50",
+            (1280, 720, "5994", _) => "hp59",
+            (1280, 720, "60", _) => "hp60",
+
+            (1920, 1080, "2398", false) => "23ps",
+            (1920, 1080, "24", false) => "24ps",
+            (1920, 1080, "25", false) => "Hp25",
+            (1920, 1080, "2997", false) => "Hp29",
+            (1920, 1080, "30", false) => "Hp30",
+            (1920, 1080, "50", false) => "Hp50",
+            (1920, 1080, "5994", false) => "Hp59",
+            (1920, 1080, "60", false) => "Hp60",
+            (1920, 1080, "25", true) => "Hi50",
+            (1920, 1080, "2997", true) => "Hi59",
+            (1920, 1080, "30", true) => "Hi60",
+
+            (2048, 1080, "2398", _) => "2d23",
+            (2048, 1080, "24", _) => "2d24",
+            (2048, 1080, "25", _) => "2d25",
+            (2048, 1080, "2997", _) => "2d29",
+            (2048, 1080, "30", _) => "2d30",
+            (2048, 1080, "50", _) => "2d50",
+            (2048, 1080, "5994", _) => "2d59",
+            (2048, 1080, "60", _) => "2d60",
+
+            (3840, 2160, "2398", _) => "4k23",
+            (3840, 2160, "24", _) => "4k24",
+            (3840, 2160, "25", _) => "4k25",
+            (3840, 2160, "2997", _) => "4k29",
+            (3840, 2160, "30", _) => "4k30",
+            (3840, 2160, "50", _) => "4k50",
+            (3840, 2160, "5994", _) => "4k59",
+            (3840, 2160, "60", _) => "4k60",
+
+            (4096, 2160, "2398", _) => "4d23",
+            (4096, 2160, "24", _) => "4d24",
+            (4096, 2160, "25", _) => "4d25",
+            (4096, 2160, "2997", _) => "4d29",
+            (4096, 2160, "30", _) => "4d30",
+            (4096, 2160, "50", _) => "4d50",
+            (4096, 2160, "5994", _) => "4d59",
+            (4096, 2160, "60", _) => "4d60",
+
+            _ => null,
+        };
+    }
+
+    private static readonly Dictionary<string, SdkDisplayMode> ModeByCode = new(StringComparer.Ordinal)
+    {
+        ["pal"] = new(_BMDDisplayMode.bmdModePAL),
+        ["ntsc"] = new(_BMDDisplayMode.bmdModeNTSC),
+        ["23ps"] = new(_BMDDisplayMode.bmdModeHD1080p2398),
+        ["24ps"] = new(_BMDDisplayMode.bmdModeHD1080p24),
+        ["Hp25"] = new(_BMDDisplayMode.bmdModeHD1080p25),
+        ["Hp29"] = new(_BMDDisplayMode.bmdModeHD1080p2997),
+        ["Hp30"] = new(_BMDDisplayMode.bmdModeHD1080p30),
+        ["Hp50"] = new(_BMDDisplayMode.bmdModeHD1080p50),
+        ["Hp59"] = new(_BMDDisplayMode.bmdModeHD1080p5994),
+        ["Hp60"] = new(_BMDDisplayMode.bmdModeHD1080p6000),
+        ["Hi50"] = new(_BMDDisplayMode.bmdModeHD1080i50),
+        ["Hi59"] = new(_BMDDisplayMode.bmdModeHD1080i5994),
+        ["Hi60"] = new(_BMDDisplayMode.bmdModeHD1080i6000),
+        ["hp50"] = new(_BMDDisplayMode.bmdModeHD720p50),
+        ["hp59"] = new(_BMDDisplayMode.bmdModeHD720p5994),
+        ["hp60"] = new(_BMDDisplayMode.bmdModeHD720p60),
+        ["2d23"] = new(_BMDDisplayMode.bmdMode2kDCI2398),
+        ["2d24"] = new(_BMDDisplayMode.bmdMode2kDCI24),
+        ["2d25"] = new(_BMDDisplayMode.bmdMode2kDCI25),
+        ["2d29"] = new(_BMDDisplayMode.bmdMode2kDCI2997),
+        ["2d30"] = new(_BMDDisplayMode.bmdMode2kDCI30),
+        ["2d50"] = new(_BMDDisplayMode.bmdMode2kDCI50),
+        ["2d59"] = new(_BMDDisplayMode.bmdMode2kDCI5994),
+        ["2d60"] = new(_BMDDisplayMode.bmdMode2kDCI60),
+        ["4k23"] = new(_BMDDisplayMode.bmdMode4K2160p2398),
+        ["4k24"] = new(_BMDDisplayMode.bmdMode4K2160p24),
+        ["4k25"] = new(_BMDDisplayMode.bmdMode4K2160p25),
+        ["4k29"] = new(_BMDDisplayMode.bmdMode4K2160p2997),
+        ["4k30"] = new(_BMDDisplayMode.bmdMode4K2160p30),
+        ["4k50"] = new(_BMDDisplayMode.bmdMode4K2160p50),
+        ["4k59"] = new(_BMDDisplayMode.bmdMode4K2160p5994),
+        ["4k60"] = new(_BMDDisplayMode.bmdMode4K2160p60),
+        ["4d23"] = new(_BMDDisplayMode.bmdMode4kDCI2398),
+        ["4d24"] = new(_BMDDisplayMode.bmdMode4kDCI24),
+        ["4d25"] = new(_BMDDisplayMode.bmdMode4kDCI25),
+        ["4d29"] = new(_BMDDisplayMode.bmdMode4kDCI2997),
+        ["4d30"] = new(_BMDDisplayMode.bmdMode4kDCI30),
+        ["4d50"] = new(_BMDDisplayMode.bmdMode4kDCI50),
+        ["4d59"] = new(_BMDDisplayMode.bmdMode4kDCI5994),
+        ["4d60"] = new(_BMDDisplayMode.bmdMode4kDCI60),
+    };
+
+    private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".bmp",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".tga",
+        ".tif",
+        ".tiff",
+        ".webp",
+    };
+
+    private sealed record SdkDisplayMode(_BMDDisplayMode DisplayMode);
+}

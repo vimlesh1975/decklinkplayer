@@ -1,0 +1,9 @@
+bin/
+obj/
+.dotnet/
+.vs/
+logs/
+*.log
+*.out
+*.s16le
+*.user
