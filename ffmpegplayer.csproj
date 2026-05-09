@@ -8,6 +8,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath Condition="'$(Platform)' == 'x64'">bin\x64\$(Configuration)\DecklinkPlayer\</OutputPath>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -28,7 +35,7 @@
   </ItemGroup>
 
   <Target Name="PrepareFreshTimestampedBuild" BeforeTargets="BeforeBuild">
-    <Exec IgnoreExitCode="true" Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference = 'SilentlyContinue'; $processes = @(Get-Process -Name '$(AssemblyName)*','ffmpegplayer*','ffmpeg'); if ($processes) { $processes | Stop-Process -Force; Start-Sleep -Milliseconds 500 }; $targetDir = '$(TargetDir)'; if (![string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) { foreach ($filter in @('$(AssemblyName)*.exe','ffmpegplayer*.exe')) { Get-ChildItem -LiteralPath $targetDir -Filter $filter -File | Remove-Item -Force } }&quot;" />
+    <Exec IgnoreExitCode="true" Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference = 'SilentlyContinue'; $processes = @(Get-Process -Name '$(AssemblyName)*','ffmpegplayer*','ffmpeg'); if ($processes) { $processes | Stop-Process -Force; Start-Sleep -Milliseconds 500 }; $targetDirs = @('$(TargetDir)','$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\DecklinkPlayout\','$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\net10.0-windows\','$(MSBuildProjectDirectory)\bin\$(Configuration)\net10.0-windows\'); foreach ($targetDir in $targetDirs) { if (![string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) { foreach ($filter in @('$(AssemblyName)*.exe','ffmpegplayer*.exe')) { Get-ChildItem -LiteralPath $targetDir -Filter $filter -File | Remove-Item -Force } } }&quot;" />
     <Message Importance="high" Text="Closed running $(AssemblyName)/ffmpegplayer/ffmpeg builds and removed old player executables from $(TargetDir)" />
   </Target>
 
@@ -38,7 +45,20 @@
     <Message Importance="high" Text="Created timestamped executable: $(TargetDir)$(TimestampedExeName)" />
   </Target>
 
-  <Target Name="StartTimestampedExe" AfterTargets="CreateTimestampedExe" Condition="'$(OutputType)' == 'WinExe' and '$(DesignTimeBuild)' != 'true'">
+  <Target Name="CopyBundledFfmpegBinaries">
+    <ItemGroup>
+      <BundledFfmpegBinaries Include="$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\net10.0-windows\ffmpeg*.exe" />
+      <BundledFfmpegBinaries Include="$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\net10.0-windows\ffprobe*.exe" />
+      <BundledFfmpegBinaries Include="$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\net10.0-windows\ffplay*.exe" />
+      <BundledFfmpegBinaries Include="$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\DecklinkPlayout\ffmpeg*.exe" />
+      <BundledFfmpegBinaries Include="$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\DecklinkPlayout\ffprobe*.exe" />
+      <BundledFfmpegBinaries Include="$(MSBuildProjectDirectory)\bin\x64\$(Configuration)\DecklinkPlayout\ffplay*.exe" />
+    </ItemGroup>
+    <Copy SourceFiles="@(BundledFfmpegBinaries)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="'@(BundledFfmpegBinaries)' != ''" />
+    <Message Importance="high" Text="Copied bundled FFmpeg binaries to $(TargetDir)" Condition="'@(BundledFfmpegBinaries)' != ''" />
+  </Target>
+
+  <Target Name="StartTimestampedExe" AfterTargets="CreateTimestampedExe" DependsOnTargets="CopyBundledFfmpegBinaries" Condition="'$(OutputType)' == 'WinExe' and '$(DesignTimeBuild)' != 'true'">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$exe = '$(TargetDir)$(TimestampedExeName)'; if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe -WorkingDirectory '$(TargetDir)' -WindowStyle Normal }&quot;" />
     <Message Importance="high" Text="Started timestamped executable: $(TargetDir)$(TimestampedExeName)" />
   </Target>

@@ -7,10 +7,16 @@ namespace ffmpegplayer;
 
 internal sealed class MainForm : Form
 {
+    private const int WM_SETREDRAW = 0x000B;
     private const string DefaultMediaFileName = "go1080p25.mp4";
     private const string DefaultMediaRootPath = @"C:\casparcg\_media";
     private const string DefaultDeckLinkDeviceName = "DeckLink SDI 4K";
     private const string DefaultDeckLinkModeCode = "Hi50";
+    private const string SettingsFolderName = "DeckLinkPlayer";
+    private const string SettingsFileName = "settings.txt";
+    private const uint PdhFormatDouble = 0x00000200;
+    private const int PdhSuccess = 0;
+    private const double CpuSmoothingFactor = 0.35;
     private const int FixedClientWidth = 1282;
     private const int RootPadding = 18;
     private const int HeaderRowHeight = 62;
@@ -117,6 +123,8 @@ internal sealed class MainForm : Form
     private TimeSpan? _pendingSeekOffset;
     private string? _selectedDurationPath;
     private string? _playbackPath;
+    private string? _savedDeviceName;
+    private string? _savedModeCode;
     private string? _nativeSeekPath;
     private string? _nativeSeekModeCode;
     private string? _nativeSeekDisabledPath;
@@ -138,6 +146,7 @@ internal sealed class MainForm : Form
     private bool _seekQueueRunning;
     private bool _pendingSeekShouldRemainPaused;
     private bool _activeSeekShouldRemainPaused;
+    private bool _loadingSettings;
     private bool _selectedDurationUnavailable;
     private bool _playbackDurationUnavailable;
     private bool _playbackIsStillImage;
@@ -147,6 +156,10 @@ internal sealed class MainForm : Form
     private ulong _lastSystemKernelTime;
     private ulong _lastSystemUserTime;
     private bool _hasSystemCpuSample;
+    private IntPtr _cpuPdhQuery;
+    private IntPtr _cpuPdhCounter;
+    private bool _hasPdhCpuCounter;
+    private double? _smoothedCpuPercent;
 
     public MainForm()
     {
@@ -157,17 +170,27 @@ internal sealed class MainForm : Form
         SetFixedClientHeight(CollapsedClientHeight);
         BackColor = Color.FromArgb(22, 25, 29);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+        DoubleBuffered = true;
+        SetStyle(
+            ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.UserPaint |
+            ControlStyles.OptimizedDoubleBuffer |
+            ControlStyles.ResizeRedraw,
+            true);
+        UpdateStyles();
 
+        _loadingSettings = true;
         BuildUi();
 
-        _inputPathBox.Text = FindDefaultMediaPath();
-        LoadMediaTree();
         _pixelFormatBox.Text = FfmpegDeckLink.DefaultPixelFormat;
         _audioChannelsBox.Value = FfmpegDeckLink.DefaultAudioChannels;
         _prerollBox.Value = (decimal)FfmpegDeckLink.DefaultPrerollSeconds;
         _duplexBox.SelectedItem = "unset";
         _linkBox.SelectedItem = "single";
         _levelABox.SelectedItem = "true";
+        LoadAppSettings();
+        _inputPathBox.Text = FindDefaultMediaPath();
+        LoadMediaTree();
         _durationProbeTimer.Tick += DurationProbeTimer_Tick;
         _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
@@ -184,10 +207,12 @@ internal sealed class MainForm : Form
             _durationProbeCancellation?.Cancel();
             _scrubSeekTimer.Stop();
             _cpuUsageTimer.Stop();
+            DisposeCpuUsageSampling();
             ExitNativeSeekPreviewMode(setStopped: false);
             ExitScrubPreviewMode(holdForReplacement: false, setStopped: false);
             DisposeAppPreviewImage();
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
+            SaveAppSettings();
         };
     }
 
@@ -195,6 +220,183 @@ internal sealed class MainForm : Form
     {
         var executableName = Path.GetFileName(Application.ExecutablePath);
         return string.IsNullOrWhiteSpace(executableName) ? "DeckLink Player" : executableName;
+    }
+
+    private static string GetSettingsFilePath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            SettingsFolderName,
+            SettingsFileName);
+    }
+
+    private void LoadAppSettings()
+    {
+        _loadingSettings = true;
+        try
+        {
+            var settings = ReadAppSettings();
+            _savedDeviceName = GetSetting(settings, "DeckLinkDevice");
+            _savedModeCode = GetSetting(settings, "DeckLinkModeCode");
+            var mediaRootPath = GetSetting(settings, "MediaRootPath");
+            if (mediaRootPath is not null)
+            {
+                _mediaRootPath = mediaRootPath;
+                _mediaRootPathBox.Text = mediaRootPath;
+            }
+
+            SetTextSetting(_videoSizeBox, settings, "VideoSize");
+            SetTextSetting(_frameRateBox, settings, "FrameRate");
+            SetTextSetting(_pixelFormatBox, settings, "PixelFormat");
+            SetNumericSetting(_audioChannelsBox, settings, "AudioChannels");
+            SetNumericSetting(_prerollBox, settings, "PrerollSeconds");
+            SelectComboValue(_duplexBox, GetSetting(settings, "Duplex"));
+            SelectComboValue(_linkBox, GetSetting(settings, "Link"));
+            SelectComboValue(_levelABox, GetSetting(settings, "LevelA"));
+
+            if (TryGetBoolSetting(settings, "PreviewOnly", out var previewOnly))
+            {
+                _previewOnlyCheckBox.Checked = previewOnly;
+            }
+
+            if (TryGetBoolSetting(settings, "PcAudio", out var pcAudio))
+            {
+                _pcAudioCheckBox.Checked = pcAudio;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Settings load skipped: {ex.Message}");
+        }
+        finally
+        {
+            _loadingSettings = false;
+        }
+    }
+
+    private void SaveAppSettings()
+    {
+        if (_loadingSettings || IsDisposed)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_deviceBox.SelectedItem is not null)
+            {
+                _savedDeviceName = _deviceBox.SelectedItem.ToString();
+            }
+
+            if (_modeBox.SelectedItem is DeckLinkMode selectedMode)
+            {
+                _savedModeCode = selectedMode.Code;
+            }
+
+            var settingsPath = GetSettingsFilePath();
+            Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
+
+            File.WriteAllLines(
+                settingsPath,
+                [
+                    $"DeckLinkDevice={_savedDeviceName ?? string.Empty}",
+                    $"DeckLinkModeCode={_savedModeCode ?? string.Empty}",
+                    $"MediaRootPath={_mediaRootPath}",
+                    $"VideoSize={_videoSizeBox.Text.Trim()}",
+                    $"FrameRate={_frameRateBox.Text.Trim()}",
+                    $"PixelFormat={_pixelFormatBox.Text.Trim()}",
+                    $"AudioChannels={_audioChannelsBox.Value.ToString(CultureInfo.InvariantCulture)}",
+                    $"PrerollSeconds={_prerollBox.Value.ToString(CultureInfo.InvariantCulture)}",
+                    $"Duplex={_duplexBox.SelectedItem?.ToString() ?? string.Empty}",
+                    $"Link={_linkBox.SelectedItem?.ToString() ?? string.Empty}",
+                    $"LevelA={_levelABox.SelectedItem?.ToString() ?? string.Empty}",
+                    $"PreviewOnly={_previewOnlyCheckBox.Checked.ToString(CultureInfo.InvariantCulture)}",
+                    $"PcAudio={_pcAudioCheckBox.Checked.ToString(CultureInfo.InvariantCulture)}",
+                ]);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Settings save skipped: {ex.Message}");
+        }
+    }
+
+    private static Dictionary<string, string> ReadAppSettings()
+    {
+        var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var settingsPath = GetSettingsFilePath();
+        if (!File.Exists(settingsPath))
+        {
+            return settings;
+        }
+
+        foreach (var line in File.ReadLines(settingsPath))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            settings[line[..separator].Trim()] = line[(separator + 1)..].Trim();
+        }
+
+        return settings;
+    }
+
+    private static string? GetSetting(Dictionary<string, string> settings, string key)
+    {
+        return settings.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value
+            : null;
+    }
+
+    private static bool TryGetBoolSetting(Dictionary<string, string> settings, string key, out bool value)
+    {
+        value = false;
+        return settings.TryGetValue(key, out var rawValue) &&
+            bool.TryParse(rawValue, out value);
+    }
+
+    private static void SetTextSetting(TextBox textBox, Dictionary<string, string> settings, string key)
+    {
+        var value = GetSetting(settings, key);
+        if (value is not null)
+        {
+            textBox.Text = value;
+        }
+    }
+
+    private static void SetNumericSetting(NumericUpDown numericUpDown, Dictionary<string, string> settings, string key)
+    {
+        if (!settings.TryGetValue(key, out var rawValue) ||
+            !decimal.TryParse(rawValue, NumberStyles.Number, CultureInfo.InvariantCulture, out var value))
+        {
+            return;
+        }
+
+        numericUpDown.Value = Math.Clamp(value, numericUpDown.Minimum, numericUpDown.Maximum);
+    }
+
+    private static void SelectComboValue(ComboBox comboBox, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        for (var i = 0; i < comboBox.Items.Count; i++)
+        {
+            if (string.Equals(comboBox.Items[i]?.ToString(), value, StringComparison.OrdinalIgnoreCase))
+            {
+                comboBox.SelectedIndex = i;
+                return;
+            }
+        }
     }
 
     private void SetFixedClientHeight(int clientHeight)
@@ -216,6 +418,7 @@ internal sealed class MainForm : Form
             Padding = new Padding(RootPadding),
             BackColor = BackColor,
         };
+        EnableDoubleBuffering(root);
 
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, HeaderRowHeight));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -233,7 +436,7 @@ internal sealed class MainForm : Form
 
         var title = new Label
         {
-            Text = "DeckLink Playout",
+            Text = "DecklinkPlayer",
             AutoSize = false,
             Size = new Size(292, 38),
             Font = new Font("Segoe UI Semibold", 21F, FontStyle.Bold, GraphicsUnit.Point),
@@ -273,6 +476,7 @@ internal sealed class MainForm : Form
             BackColor = BackColor,
             Padding = new Padding(0, 4, 0, 8),
         };
+        EnableDoubleBuffering(area);
         area.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, SourceColumnWidth));
         area.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, PreviewColumnWidth));
         area.RowStyles.Add(new RowStyle(SizeType.Absolute, AppPreviewAreaHeight));
@@ -387,8 +591,16 @@ internal sealed class MainForm : Form
         StyleButton(_refreshModesButton, Color.FromArgb(52, 67, 82));
         _refreshModesButton.Click += async (_, _) => await RefreshModesAsync();
 
-        _deviceBox.SelectedIndexChanged += async (_, _) => await RefreshModesAsync();
-        _modeBox.SelectedIndexChanged += (_, _) => ApplySelectedModeToFields();
+        _deviceBox.SelectedIndexChanged += async (_, _) =>
+        {
+            SaveAppSettings();
+            await RefreshModesAsync();
+        };
+        _modeBox.SelectedIndexChanged += (_, _) =>
+        {
+            ApplySelectedModeToFields();
+            SaveAppSettings();
+        };
 
         content.Controls.Add(BuildInputRow("Device", _deviceBox, _refreshDevicesButton), 0, 0);
         content.Controls.Add(BuildInputRow("Mode", _modeBox, _refreshModesButton), 0, 1);
@@ -422,6 +634,7 @@ internal sealed class MainForm : Form
         _linkBox.Items.AddRange(["unset", "single", "dual", "quad"]);
         _levelABox.DropDownStyle = ComboBoxStyle.DropDownList;
         _levelABox.Items.AddRange(["unset", "true", "false"]);
+        RegisterDeckLinkSettingsPersistenceEvents();
 
         AddGridField(outputGrid, "Size", _videoSizeBox, 0, 0);
         AddGridField(outputGrid, "Rate", _frameRateBox, 2, 0);
@@ -450,6 +663,18 @@ internal sealed class MainForm : Form
 
         panel.Controls.Add(content);
         return panel;
+    }
+
+    private void RegisterDeckLinkSettingsPersistenceEvents()
+    {
+        _videoSizeBox.TextChanged += (_, _) => SaveAppSettings();
+        _frameRateBox.TextChanged += (_, _) => SaveAppSettings();
+        _pixelFormatBox.TextChanged += (_, _) => SaveAppSettings();
+        _audioChannelsBox.ValueChanged += (_, _) => SaveAppSettings();
+        _prerollBox.ValueChanged += (_, _) => SaveAppSettings();
+        _duplexBox.SelectedIndexChanged += (_, _) => SaveAppSettings();
+        _linkBox.SelectedIndexChanged += (_, _) => SaveAppSettings();
+        _levelABox.SelectedIndexChanged += (_, _) => SaveAppSettings();
     }
 
     private Control BuildDetailsPanel()
@@ -707,9 +932,10 @@ internal sealed class MainForm : Form
         _previewOnlyCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
         _previewOnlyCheckBox.CheckedChanged += (_, _) =>
         {
-            SetStatus(_previewOnlyCheckBox.Checked ? "Preview only" : "Ready", _previewOnlyCheckBox.Checked
+            SetStatus(PreviewOnlyMode ? "Preview only" : "Ready", PreviewOnlyMode
                 ? Color.FromArgb(232, 181, 105)
                 : Color.FromArgb(130, 210, 164));
+            SaveAppSettings();
         };
 
         panel.Controls.Add(_toggleSettingsButton);
@@ -723,6 +949,7 @@ internal sealed class MainForm : Form
         _pcAudioCheckBox.Margin = new Padding(0);
         _pcAudioCheckBox.TextAlign = ContentAlignment.MiddleLeft;
         _pcAudioCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
+        _pcAudioCheckBox.CheckedChanged += (_, _) => SaveAppSettings();
         panel.Controls.Add(_pcAudioCheckBox);
         return panel;
     }
@@ -860,12 +1087,15 @@ internal sealed class MainForm : Form
         _settingsVisible = visible;
         _toggleSettingsButton.Text = visible ? "Hide Settings" : "Show Settings";
 
-        if (_outputSettingsPanel is not null)
+        RunWithoutRedraw(() =>
         {
-            _outputSettingsPanel.Visible = visible;
-        }
+            if (_outputSettingsPanel is not null)
+            {
+                _outputSettingsPanel.Visible = visible;
+            }
 
-        UpdateDetailsPanelVisibility();
+            UpdateDetailsPanelVisibility();
+        });
     }
 
     private void SetLogVisible(bool visible)
@@ -873,12 +1103,15 @@ internal sealed class MainForm : Form
         _logVisible = visible;
         _toggleLogButton.Text = visible ? "Hide Log" : "Show Log";
 
-        if (_logPanel is not null)
+        RunWithoutRedraw(() =>
         {
-            _logPanel.Visible = visible;
-        }
+            if (_logPanel is not null)
+            {
+                _logPanel.Visible = visible;
+            }
 
-        UpdateDetailsPanelVisibility();
+            UpdateDetailsPanelVisibility();
+        });
     }
 
     private void UpdateDetailsPanelVisibility()
@@ -933,7 +1166,45 @@ internal sealed class MainForm : Form
         SetFixedClientHeight(anyVisible ? ExpandedClientHeight : CollapsedClientHeight);
     }
 
-    private bool PreviewOnlyMode => _previewOnlyCheckBox.Checked;
+    private void RunWithoutRedraw(Action action)
+    {
+        if (!IsHandleCreated)
+        {
+            action();
+            return;
+        }
+
+        SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+        SuspendLayout();
+
+        try
+        {
+            action();
+        }
+        finally
+        {
+            _detailsPanelLayout?.PerformLayout();
+            _settingsSplit?.PerformLayout();
+            ResumeLayout(performLayout: true);
+            SendMessage(Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+            Invalidate(invalidateChildren: true);
+            Update();
+        }
+    }
+
+    private static void EnableDoubleBuffering(Control control)
+    {
+        typeof(Control)
+            .GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(control, true, null);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    private bool HasDeckLinkDevice => _deviceBox.SelectedItem is not null;
+
+    private bool PreviewOnlyMode => _previewOnlyCheckBox.Checked || !HasDeckLinkDevice;
 
     private bool PcAudioMode => _pcAudioCheckBox.Checked;
 
@@ -1154,6 +1425,7 @@ internal sealed class MainForm : Form
         _mediaRootPathBox.Text = path;
         _mediaSearchBox.Clear();
         LoadMediaTree();
+        SaveAppSettings();
         AppendLog($"Media library changed to {path}");
     }
 
@@ -2942,12 +3214,17 @@ internal sealed class MainForm : Form
             return;
         }
 
-        await RunUiTaskAsync("Refreshing DeckLink devices...", async cancellationToken =>
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
         {
-            var previous = _deviceBox.SelectedItem?.ToString();
-            var devices = await _deckLink.ListDevicesAsync(GetFfmpegPath(), cancellationToken);
+            SetStatus("Refreshing DeckLink devices...", Color.FromArgb(126, 188, 226));
+            SetControlsEnabled(false);
+
+            var previous = _deviceBox.SelectedItem?.ToString() ?? _savedDeviceName;
+            var devices = await _deckLink.ListDevicesAsync(GetFfmpegPath(), cancellation.Token);
 
             _deviceBox.Items.Clear();
+            _modeBox.Items.Clear();
             foreach (var device in devices)
             {
                 _deviceBox.Items.Add(device);
@@ -2959,9 +3236,28 @@ internal sealed class MainForm : Form
 
                 _deviceBox.SelectedIndex = selectedIndex;
             }
+            else
+            {
+                ApplyDeckLinkUnavailableFallback("No DeckLink device detected. Preview-only mode is available.");
+                return;
+            }
 
             AppendLog($"Found {devices.Count} DeckLink device(s).");
-        });
+            SetStatus("Ready", Color.FromArgb(130, 210, 164));
+        }
+        catch (Exception ex) when (IsDeckLinkUnavailableException(ex))
+        {
+            ApplyDeckLinkUnavailableFallback($"DeckLink output unavailable. Preview-only mode is available. {FirstLine(ex.Message)}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Error: {ex.Message}");
+            SetStatus("Error", Color.FromArgb(229, 113, 105));
+        }
+        finally
+        {
+            SetControlsEnabled(true);
+        }
     }
 
     private async Task RefreshModesAsync()
@@ -2971,11 +3267,15 @@ internal sealed class MainForm : Form
             return;
         }
 
-        await RunUiTaskAsync("Loading DeckLink modes...", async cancellationToken =>
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
         {
+            SetStatus("Loading DeckLink modes...", Color.FromArgb(126, 188, 226));
+            SetControlsEnabled(false);
+
             var device = GetSelectedDevice();
-            var previousCode = (_modeBox.SelectedItem as DeckLinkMode)?.Code;
-            var modes = await _deckLink.ListFormatsAsync(GetFfmpegPath(), device, cancellationToken);
+            var previousCode = (_modeBox.SelectedItem as DeckLinkMode)?.Code ?? _savedModeCode;
+            var modes = await _deckLink.ListFormatsAsync(GetFfmpegPath(), device, cancellation.Token);
 
             _modeBox.Items.Clear();
             foreach (var mode in modes)
@@ -2991,7 +3291,21 @@ internal sealed class MainForm : Form
             }
 
             AppendLog($"Loaded {modes.Count} mode(s) for {device}.");
-        });
+            SetStatus("Ready", Color.FromArgb(130, 210, 164));
+        }
+        catch (Exception ex) when (IsDeckLinkUnavailableException(ex))
+        {
+            ApplyDeckLinkUnavailableFallback($"DeckLink modes unavailable. Preview-only mode is available. {FirstLine(ex.Message)}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Error: {ex.Message}");
+            SetStatus("Error", Color.FromArgb(229, 113, 105));
+        }
+        finally
+        {
+            SetControlsEnabled(true);
+        }
     }
 
     private void ApplySelectedModeToFields()
@@ -3010,6 +3324,58 @@ internal sealed class MainForm : Form
         _statusLabel.ForeColor = mode.IsInterlaced
             ? Color.FromArgb(232, 181, 105)
             : Color.FromArgb(130, 210, 164);
+    }
+
+    private void ApplyDeckLinkUnavailableFallback(string message)
+    {
+        _deviceBox.Items.Clear();
+        _modeBox.Items.Clear();
+        ApplyDefaultPreviewModeValues();
+
+        if (!_previewOnlyCheckBox.Checked)
+        {
+            _previewOnlyCheckBox.Checked = true;
+        }
+
+        AppendLog(message);
+        SetStatus("Preview only (no DeckLink)", Color.FromArgb(232, 181, 105));
+    }
+
+    private void ApplyDefaultPreviewModeValues()
+    {
+        if (string.IsNullOrWhiteSpace(_videoSizeBox.Text))
+        {
+            _videoSizeBox.Text = "1920x1080";
+        }
+
+        if (string.IsNullOrWhiteSpace(_frameRateBox.Text))
+        {
+            _frameRateBox.Text = "25000/1000";
+        }
+    }
+
+    private static bool IsDeckLinkUnavailableException(Exception ex)
+    {
+        var text = ex.ToString();
+        return text.Contains("decklink", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("blackmagic", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("No such device", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Cannot open video device", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Could not open input", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FirstLine(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var firstLine = text
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault();
+
+        return string.IsNullOrWhiteSpace(firstLine) ? string.Empty : firstLine.Trim();
     }
 
     private async Task StartPlaybackAsync(
@@ -3130,6 +3496,11 @@ internal sealed class MainForm : Form
         {
             AppendLog("Playback stopped.");
             SetStatus("Stopped", Color.FromArgb(130, 210, 164));
+        }
+        catch (Exception ex) when (!PreviewOnlyMode && IsDeckLinkUnavailableException(ex))
+        {
+            ApplyDeckLinkUnavailableFallback($"DeckLink output unavailable. Preview-only mode is available. {FirstLine(ex.Message)}");
+            DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
         }
         catch (Exception ex)
         {
@@ -3480,7 +3851,7 @@ internal sealed class MainForm : Form
         _stopButton.Enabled = isPlaying;
         _pauseResumeButton.Enabled = isPlaying;
         _refreshDevicesButton.Enabled = !isPlaying;
-        _refreshModesButton.Enabled = !isPlaying;
+        _refreshModesButton.Enabled = !isPlaying && HasDeckLinkDevice;
         _refreshMediaButton.Enabled = !isPlaying;
         _browseMediaRootButton.Enabled = true;
         _mediaRootPathBox.Enabled = true;
@@ -3502,7 +3873,7 @@ internal sealed class MainForm : Form
     private void SetControlsEnabled(bool enabled)
     {
         _refreshDevicesButton.Enabled = enabled;
-        _refreshModesButton.Enabled = enabled;
+        _refreshModesButton.Enabled = enabled && HasDeckLinkDevice;
         _pauseResumeButton.Enabled = _isPlaying;
         _refreshMediaButton.Enabled = enabled && !_isPlaying;
         _browseMediaRootButton.Enabled = enabled;
@@ -3523,6 +3894,13 @@ internal sealed class MainForm : Form
 
     private void InitializeCpuUsageSampling()
     {
+        _hasPdhCpuCounter = TryInitializePdhCpuCounter();
+        if (_hasPdhCpuCounter)
+        {
+            _cpuUsageLabel.Text = "PC CPU --";
+            return;
+        }
+
         if (!TryGetSystemCpuTimes(out _lastSystemIdleTime, out _lastSystemKernelTime, out _lastSystemUserTime))
         {
             _hasSystemCpuSample = false;
@@ -3536,6 +3914,16 @@ internal sealed class MainForm : Form
 
     private void UpdateCpuUsageLabel()
     {
+        if (_hasPdhCpuCounter)
+        {
+            if (TryReadPdhCpuPercent(out var pdhCpuPercent))
+            {
+                UpdateCpuUsageDisplay(SmoothCpuPercent(pdhCpuPercent));
+            }
+
+            return;
+        }
+
         if (!TryGetSystemCpuTimes(out var idleTime, out var kernelTime, out var userTime))
         {
             _cpuUsageLabel.Text = "PC CPU --";
@@ -3572,8 +3960,23 @@ internal sealed class MainForm : Form
 
         var busyDelta = totalDelta > idleDelta ? totalDelta - idleDelta : 0;
         var cpuPercent = Math.Clamp((double)busyDelta / totalDelta * 100d, 0d, 100d);
+        UpdateCpuUsageDisplay(SmoothCpuPercent(cpuPercent));
+    }
+
+    private void UpdateCpuUsageDisplay(double cpuPercent)
+    {
         _cpuUsageLabel.Text = $"PC CPU {cpuPercent:0}%";
         _cpuUsageLabel.ForeColor = GetCpuUsageColor(cpuPercent);
+    }
+
+    private double SmoothCpuPercent(double cpuPercent)
+    {
+        cpuPercent = Math.Clamp(cpuPercent, 0d, 100d);
+        _smoothedCpuPercent = _smoothedCpuPercent.HasValue
+            ? _smoothedCpuPercent.Value + (cpuPercent - _smoothedCpuPercent.Value) * CpuSmoothingFactor
+            : cpuPercent;
+
+        return _smoothedCpuPercent.Value;
     }
 
     private static Color GetCpuUsageColor(double cpuPercent)
@@ -3589,6 +3992,72 @@ internal sealed class MainForm : Form
         }
 
         return Color.FromArgb(130, 210, 164);
+    }
+
+    private bool TryInitializePdhCpuCounter()
+    {
+        if (PdhOpenQuery(null, IntPtr.Zero, out _cpuPdhQuery) != PdhSuccess)
+        {
+            _cpuPdhQuery = IntPtr.Zero;
+            return false;
+        }
+
+        if (PdhAddEnglishCounter(
+                _cpuPdhQuery,
+                @"\Processor(_Total)\% Processor Time",
+                IntPtr.Zero,
+                out _cpuPdhCounter) != PdhSuccess)
+        {
+            DisposeCpuUsageSampling();
+            return false;
+        }
+
+        if (PdhCollectQueryData(_cpuPdhQuery) != PdhSuccess)
+        {
+            DisposeCpuUsageSampling();
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryReadPdhCpuPercent(out double cpuPercent)
+    {
+        cpuPercent = 0d;
+        if (_cpuPdhQuery == IntPtr.Zero || _cpuPdhCounter == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        if (PdhCollectQueryData(_cpuPdhQuery) != PdhSuccess)
+        {
+            return false;
+        }
+
+        var status = PdhGetFormattedCounterValue(
+            _cpuPdhCounter,
+            PdhFormatDouble,
+            out _,
+            out var value);
+        if (status != PdhSuccess || value.CStatus != PdhSuccess)
+        {
+            return false;
+        }
+
+        cpuPercent = Math.Clamp(value.DoubleValue, 0d, 100d);
+        return true;
+    }
+
+    private void DisposeCpuUsageSampling()
+    {
+        if (_cpuPdhQuery != IntPtr.Zero)
+        {
+            PdhCloseQuery(_cpuPdhQuery);
+        }
+
+        _cpuPdhQuery = IntPtr.Zero;
+        _cpuPdhCounter = IntPtr.Zero;
+        _hasPdhCpuCounter = false;
     }
 
     private static bool TryGetSystemCpuTimes(out ulong idleTime, out ulong kernelTime, out ulong userTime)
@@ -3608,11 +4077,44 @@ internal sealed class MainForm : Form
         return true;
     }
 
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    private static extern int PdhOpenQuery(
+        string? dataSource,
+        IntPtr userData,
+        out IntPtr query);
+
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode, EntryPoint = "PdhAddEnglishCounterW")]
+    private static extern int PdhAddEnglishCounter(
+        IntPtr query,
+        string counterPath,
+        IntPtr userData,
+        out IntPtr counter);
+
+    [DllImport("pdh.dll")]
+    private static extern int PdhCollectQueryData(IntPtr query);
+
+    [DllImport("pdh.dll")]
+    private static extern int PdhGetFormattedCounterValue(
+        IntPtr counter,
+        uint format,
+        out uint type,
+        out PdhFormattedCounterValue value);
+
+    [DllImport("pdh.dll")]
+    private static extern int PdhCloseQuery(IntPtr query);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetSystemTimes(
         out NativeFileTime idleTime,
         out NativeFileTime kernelTime,
         out NativeFileTime userTime);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PdhFormattedCounterValue
+    {
+        public uint CStatus;
+        public double DoubleValue;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeFileTime

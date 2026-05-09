@@ -32,11 +32,6 @@ internal sealed partial class FfmpegDeckLink
             cancellationToken: cancellationToken);
 
         var devices = ParseDeviceNames(result.StandardError);
-        if (devices.Count == 0 && !string.IsNullOrWhiteSpace(result.StandardError))
-        {
-            throw new InvalidOperationException(result.StandardError.Trim());
-        }
-
         return devices;
     }
 
