@@ -1,120 +1,162 @@
-# DeckLink Player
+# DecklinkPlayer
 
-Small Windows desktop app for DeckLink playout.
+DecklinkPlayer is a Windows desktop playout tool for Blackmagic DeckLink cards. It is built for practical studio use: browse media, preview locally, monitor audio, seek quickly, and send clean SDI video/audio through the Blackmagic DeckLink SDK.
 
-It decodes media with your bundled `ffmpeg.exe`, then outputs video frames and embedded audio directly through the Blackmagic DeckLink SDK.
+The app uses your bundled FFmpeg binaries only for decoding and probing. DeckLink output is handled by the Blackmagic SDK.
 
-## What it does
+## Highlights
 
-- Opens a desktop GUI for media playout
-- Shows and searches video and image files in `C:\casparcg\_media`
-- Lists DeckLink devices visible to FFmpeg
-- Lists supported modes for a DeckLink device
-- Plays a media file out to DeckLink through the Blackmagic SDK
-- Plays an internal moving test signal for DeckLink timing checks
-- Keeps a live playback log in the app
+- Desktop WinForms GUI for fast manual playout.
+- Blackmagic DeckLink SDK output with embedded audio.
+- Preview-only mode when no DeckLink output is needed.
+- In-app video preview alongside SDI output.
+- Vertical left/right audio meters in dBFS.
+- PC audio monitor option using bundled `ffplay.exe`.
+- Media tree and search for a library folder, defaulting to `C:\casparcg\_media`.
+- Video and still-image browsing.
+- Pause, resume, seekbar, frame step, 5-frame, 10-frame, and 1-second seek controls.
+- Starts a newly selected file while another file is already playing.
+- Persistent settings for DeckLink device, mode, media folder, preview-only, and PC audio.
+- Playback logs written beside the app in `logs\ffmpeg_playout_*.log`.
+- x64-only build for DeckLink and FFmpeg compatibility.
+
+## Current Defaults
+
+- App heading: `DecklinkPlayer`
+- Default media root: `C:\casparcg\_media`
+- Default media file: `go1080p25.mp4`
+- Default DeckLink device: `DeckLink SDI 4K`
+- Default DeckLink mode: `Hi50` / 1080i50
+- Pixel format: `uyvy422`
+- Audio: 48 kHz, 32-bit PCM, stereo by default
+- Output folder: `bin\x64\Debug\DecklinkPlayer`
 
 ## Requirements
 
-- Windows with Blackmagic Desktop Video drivers installed
-- Your bundled `ffmpeg.exe` in the app/output folder
-- FFmpeg build compiled with DeckLink support for device/mode listing
-- `DeckLinkAPI.Interop.dll` beside the app for SDK playout
+- Windows x64.
+- .NET Desktop Runtime 10, unless you publish a self-contained build.
+- Blackmagic Desktop Video drivers for DeckLink output.
+- `DeckLinkAPI.Interop.dll` in the app output folder.
+- Your own bundled 64-bit FFmpeg binaries in the app output folder:
+  - `ffmpeg.exe`
+  - `ffprobe.exe`
+  - `ffplay.exe` only if you want PC audio monitor
 
-You already appear to have a compatible FFmpeg build in this environment.
+The app intentionally does not rely on random system FFmpeg from `PATH`. Keep the FFmpeg binaries beside the running `decklinkplayer_*.exe`.
 
 ## Build
 
-```powershell
-dotnet build
-```
-
-Each build force-closes any running `ffmpegplayer*` process, deletes older exe copies from the output folder, creates one fresh timestamped exe, and removes the plain `ffmpegplayer.exe`.
-
-## Desktop GUI
-
-Run:
+Build the x64 desktop app:
 
 ```powershell
-dotnet run
+dotnet build .\ffmpegplayer.csproj -p:Platform=x64
 ```
 
-Or open the latest timestamped app in the build folder:
+The build target automatically:
+
+- Closes old running `decklinkplayer*`, `ffmpegplayer*`, and `ffmpeg` processes.
+- Removes old timestamped player exe files from the output folder.
+- Builds into `bin\x64\Debug\DecklinkPlayer`.
+- Creates a timestamped exe like `decklinkplayer_090526_163758.exe`.
+- Deletes the plain `decklinkplayer.exe`.
+- Starts the new timestamped exe automatically.
+
+## Running
+
+Use the latest timestamped exe in:
 
 ```powershell
-bin\Debug\net10.0-windows\ffmpegplayer_*.exe
+bin\x64\Debug\DecklinkPlayer
 ```
 
-The app searches only for your bundled `ffmpeg.exe` beside the app or inside common project `bin` folders. It does not fall back to PATH.
-The media tree defaults to `C:\casparcg\_media`; use the Search box to find clips or still images by filename, select a file to load it, then use `Play Selected` or double-click a file to start playout. If another file is already playing, `Play Selected` or double-click stops the current playout and starts the new one.
-The media field defaults to `go1080p25.mp4` when that file is found beside the app or in a common project output folder.
-The DeckLink device defaults to `DeckLink SDI 4K`.
-The DeckLink mode defaults to `Hi50`, which is 1920x1080 interlaced 50 fields / 25 frames per second.
-The SDK output maps the DeckLink format codes reported by `DeckLink SDI 4K`, including SD, 720p, 1080p/i, 2K DCI, UHD 4K, and DCI 4K modes.
-Loop is checked by default in the GUI.
-Preroll defaults to `0.5` and duplex defaults to `unset`.
-For `DeckLink SDI 4K`, the app always omits `-duplex_mode` because that card reports the option as unsupported.
-The SDI link defaults to `single`, and 3G-SDI Level A defaults to `true`; both are exposed in the GUI so you can quickly try `unset` or `false` if the downstream monitor or router needs a different SDI flavor.
-Use `Moving Test` to send an internal animated test signal without reading a media file.
-SDK playout outputs 48 kHz 32-bit PCM embedded SDI audio for normal file playback.
-Still images are shown in the media tree and play as silent held frames until stopped or switched.
-
-## CLI Commands
-
-After building, use the generated DLL for command-line checks:
+Example:
 
 ```powershell
-$player = ".\bin\Debug\net10.0-windows\ffmpegplayer.dll"
+.\bin\x64\Debug\DecklinkPlayer\decklinkplayer_090526_163758.exe
 ```
 
-List devices:
+Make sure `ffmpeg.exe` and `ffprobe.exe` are in the same folder.
 
-```powershell
-dotnet $player devices
+## Using The App
+
+1. Choose or browse a media library folder.
+2. Search or select a file from the media tree.
+3. Use Preview only if you only want local app preview.
+4. Uncheck Preview only for DeckLink SDI playout.
+5. Use Pause, Stop, seekbar, and frame/second seek buttons while playing.
+6. Use Show Settings and Show Log only when you need those panels.
+
+Preview only can be checked and the app will still search for DeckLink devices on startup, so you can switch to SDI output later without restarting.
+
+## DeckLink Output
+
+DeckLink playout uses the Blackmagic SDK directly. FFmpeg decodes video to UYVY frames and audio to PCM; the SDK writes frames and audio to the selected output device.
+
+This route is used because it gives better reliability than FFmpeg's DeckLink muxer for this app's seek, pause, preview, and switching workflow.
+
+## Preview And Audio
+
+The preview window shows the decoded video inside the app. Audio meters show left and right channel peaks in dBFS with green, yellow, and red zones.
+
+If `PC audio` is checked, DecklinkPlayer launches bundled `ffplay.exe` as a monitor. This is separate from embedded DeckLink SDI audio.
+
+## Settings
+
+Settings are saved here:
+
+```text
+%APPDATA%\DeckLinkPlayer\settings.txt
 ```
 
-List modes for one device:
+Saved values include:
 
-```powershell
-dotnet $player formats --device "DeckLink SDI 4K"
+- DeckLink device
+- DeckLink mode
+- Media root folder
+- Video size and frame rate
+- Pixel format
+- Audio channel count
+- SDI link and Level A options
+- Preview only
+- PC audio
+
+## Logs
+
+Playback logs are written to:
+
+```text
+bin\x64\Debug\DecklinkPlayer\logs
 ```
 
-Play a file using a DeckLink format code:
+Log files are named:
 
-```powershell
-dotnet $player play --input "C:\media\clip.mp4" --device "DeckLink SDI 4K" --format-code Hp25
+```text
+ffmpeg_playout_DDMMYY_HHMMSS.log
 ```
 
-Play a file by explicitly setting output size and frame rate:
+These logs include decoder commands, FFmpeg messages, SDK playback status, and useful sync/debug messages.
 
-```powershell
-dotnet $player play --input "C:\media\clip.mp4" --device "DeckLink SDI 4K" --video-size 1920x1080 --frame-rate 25
-```
+## Troubleshooting
 
-Loop forever:
+If DeckLink is not installed or not detected, the app should not show a fatal error. It will stay usable in Preview only mode.
 
-```powershell
-dotnet $player play --input "C:\media\clip.mp4" --device "DeckLink SDI 4K" --format-code Hp25 --loop
-```
+If playback cannot start, check that `ffmpeg.exe` and `ffprobe.exe` are beside the timestamped exe.
 
-Preview the generated SDK decoder commands without starting playback:
+If PC audio does not start, check that `ffplay.exe` is also beside the timestamped exe.
 
-```powershell
-dotnet $player play --input "C:\media\clip.mp4" --device "DeckLink SDI 4K" --format-code Hp25 --dry-run
-```
+If DeckLink output is black, confirm the selected device and mode match your card, monitor, router, and SDI format.
 
-## Notes
+If audio/video sync looks wrong after seeking, test the same file from the beginning and check the latest `logs\ffmpeg_playout_*.log`.
 
-- The player defaults to `uyvy422`, which is the safest DeckLink output pixel format for this first version.
-- Interlaced DeckLink modes are tagged with their listed field order before playout, and the output stream also sets `-field_order`.
-- File playout uses `-re` so FFmpeg reads media at real-time speed instead of burst-filling the DeckLink buffer.
-- Output size and rate are set with DeckLink-friendly `-s` and `-r` options instead of duplicate scale/fps filters.
-- Live decoder/playout logging is shown in the GUI and written to `logs\ffmpeg_playout_*.log` beside the app.
-- If you do not pass `--format-code` or explicit `--video-size` and `--frame-rate`, the input file must already match a DeckLink-supported mode.
-- Use `Ctrl+C` to stop playout.
+If the app asks for .NET runtime, install the x64 .NET Desktop Runtime 10.
 
-## Good next steps
+## Developer Notes
 
-- Add tighter single-process SDK A/V synchronization
-- Add scheduled playlist playout
-- Add local web control panel
+- Main GUI: `MainForm.cs`
+- DeckLink SDK playout engine: `DeckLinkSdkPlayer.cs`
+- FFmpeg command helpers and CLI parsing: `FfmpegDeckLink.cs`, `Cli.cs`
+- Audio meter control: `AudioMeterBar.cs`
+- Media root browser: `MediaRootDialog.cs`
+- DeckLink COM interop: `Interop\DeckLinkAPI.Interop.dll`
+
+The project is named `ffmpegplayer.csproj` for history, but the built assembly and exe are `decklinkplayer`.

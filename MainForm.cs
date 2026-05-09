@@ -34,6 +34,7 @@ internal sealed class MainForm : Form
     private const int PreviewColumnWidth = AppPreviewPanelWidth + 18;
     private const int SourceColumnWidth = 520;
     private const int SeekGroupWidth = AppPreviewPanelWidth;
+    private const int SeekPositiveGroupGap = 8;
     private const int TransportSpanWidth = SourceColumnWidth + PreviewColumnWidth;
     private const int DetailsPanelHeight = 320;
     private const int SettingsAreaVerticalPadding = 12;
@@ -1018,11 +1019,11 @@ internal sealed class MainForm : Form
         var rightPanel = BuildSeekButtonPanel(positiveControls, rightWidth);
         rightPanel.Location = new Point(leftWidth + transportWidth, 0);
 
-        var controlsWidth = leftWidth + transportWidth + rightWidth;
+        var controlsWidth = leftWidth + transportWidth + SeekPositiveGroupGap + rightWidth;
         var centeredX = Math.Max(0, (buttonPanel.Width - controlsWidth) / 2);
         leftPanel.Location = new Point(centeredX, 0);
         transportPanel.Location = new Point(centeredX + leftWidth, 0);
-        rightPanel.Location = new Point(centeredX + leftWidth + transportWidth, 0);
+        rightPanel.Location = new Point(centeredX + leftWidth + transportWidth + SeekPositiveGroupGap, 0);
 
         buttonPanel.Controls.Add(leftPanel);
         buttonPanel.Controls.Add(transportPanel);
