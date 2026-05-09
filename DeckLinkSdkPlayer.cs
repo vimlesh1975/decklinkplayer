@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -43,7 +44,10 @@ internal sealed class DeckLinkSdkPlayer
         Action<string>? logLine = null,
         CancellationToken cancellationToken = default,
         PlaybackPauseController? pauseController = null,
-        bool renderInitialFrameWhilePaused = false)
+        bool renderInitialFrameWhilePaused = false,
+        Action<byte[], int, int>? previewFrame = null,
+        int previewFrameInterval = 5,
+        Action<double, double>? audioMeter = null)
     {
         var mode = ResolveDisplayMode(request);
         var acquiredOutput = AcquireDeckLinkOutput(request.Device, mode.DisplayMode, logLine);
@@ -131,7 +135,7 @@ internal sealed class DeckLinkSdkPlayer
                     () => PumpErrorAsync(audioDecoder, "audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
                 audioPumpTask = Task.Run(
-                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, logLine, cancellationToken),
+                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, cancellationToken),
                     cancellationToken);
             }
 
@@ -192,6 +196,14 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 frameNumber++;
+                if (previewFrame is not null &&
+                    (frameNumber == 1 || (previewFrameInterval > 0 && frameNumber % previewFrameInterval == 0)))
+                {
+                    var previewBuffer = new byte[frameBytes];
+                    Buffer.BlockCopy(frameBuffer, 0, previewBuffer, 0, frameBytes);
+                    previewFrame(previewBuffer, width, height);
+                }
+
                 if (shouldRenderInitialPausedFrame)
                 {
                     renderedInitialPausedFrame = true;
@@ -288,6 +300,137 @@ internal sealed class DeckLinkSdkPlayer
             {
                 ReleaseCom(output);
                 ReleaseCom(deckLink);
+            }
+        }
+    }
+
+    public async Task<ProcessResult> PlayPreviewOnlyAsync(
+        PlayRequest request,
+        Action<string>? logLine = null,
+        CancellationToken cancellationToken = default,
+        PlaybackPauseController? pauseController = null,
+        bool renderInitialFrameWhilePaused = false,
+        Action<byte[], int, int>? previewFrame = null,
+        Action<double, double>? audioMeter = null)
+    {
+        var size = ParseVideoSize(request.VideoSize)
+            ?? throw new InvalidOperationException("Preview-only playback needs a valid video size.");
+        var width = size.Width;
+        var height = size.Height;
+        var frameBytes = checked(width * height * BytesPerPixelUyvy);
+        var frameBuffer = new byte[frameBytes];
+
+        using var videoDecoder = StartVideoDecoder(request);
+        Process? audioDecoder = null;
+        var stderr = new List<string>();
+        var videoStderrTask = Task.Run(
+            () => PumpErrorAsync(videoDecoder, "preview-video-decoder", stderr, logLine, cancellationToken),
+            cancellationToken);
+        Task? audioStderrTask = null;
+        Task? audioPumpTask = null;
+        var killedByCancellation = false;
+
+        using var cancellationRegistration = cancellationToken.Register(() =>
+        {
+            killedByCancellation = true;
+            TryKill(videoDecoder);
+            TryKill(audioDecoder);
+        });
+
+        try
+        {
+            if (!request.NoAudio)
+            {
+                audioDecoder = StartAudioDecoder(request);
+                audioStderrTask = Task.Run(
+                    () => PumpErrorAsync(audioDecoder, "preview-audio-decoder", stderr, logLine, cancellationToken),
+                    cancellationToken);
+                audioPumpTask = Task.Run(
+                    () => PumpAudioMeterOnlyAsync(audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, cancellationToken),
+                    cancellationToken);
+            }
+
+            var audioDescription = request.NoAudio
+                ? "video only"
+                : $"{request.AudioChannels}ch audio metering";
+            logLine?.Invoke($"Preview-only playback enabled: {width}x{height}, {NormalizeRateString(request.FrameRate)} fps, {audioDescription}.");
+            logLine?.Invoke("DeckLink output is disabled. FFmpeg is decoding only for the in-app preview.");
+
+            var frameNumber = 0L;
+            var stopwatch = Stopwatch.StartNew();
+            var frameTicks = GetFrameTicks(request.FrameRate);
+            var pausedTicks = 0L;
+            var renderedInitialPausedFrame = false;
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var shouldRenderInitialPausedFrame =
+                    renderInitialFrameWhilePaused &&
+                    pauseController?.IsPaused == true &&
+                    frameNumber == 0 &&
+                    !renderedInitialPausedFrame;
+
+                if (pauseController?.IsPaused == true && !shouldRenderInitialPausedFrame)
+                {
+                    var pauseStartedTicks = stopwatch.ElapsedTicks;
+                    await pauseController.WaitIfPausedAsync(cancellationToken);
+                    pausedTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
+                }
+
+                if (!await ReadExactFrameAsync(videoDecoder.StandardOutput.BaseStream, frameBuffer, cancellationToken))
+                {
+                    break;
+                }
+
+                previewFrame?.Invoke(frameBuffer, width, height);
+
+                frameNumber++;
+                if (shouldRenderInitialPausedFrame)
+                {
+                    renderedInitialPausedFrame = true;
+                }
+
+                if (frameNumber % 100 == 0)
+                {
+                    logLine?.Invoke($"preview_frame={frameNumber}");
+                }
+
+                var targetTicks = frameNumber * frameTicks;
+                var remainingTicks = targetTicks - (stopwatch.ElapsedTicks - pausedTicks);
+                if (remainingTicks > 0)
+                {
+                    var delayMs = (int)Math.Min(remainingTicks * 1000 / Stopwatch.Frequency, 100);
+                    if (delayMs > 0)
+                    {
+                        await Task.Delay(delayMs, cancellationToken);
+                    }
+                }
+            }
+
+            TryKill(videoDecoder);
+            TryKill(audioDecoder);
+
+            await videoDecoder.WaitForExitAsync(CancellationToken.None);
+            if (audioDecoder is not null)
+            {
+                await audioDecoder.WaitForExitAsync(CancellationToken.None);
+                audioDecoder.Dispose();
+                audioDecoder = null;
+            }
+
+            await IgnoreCancellationAsync(videoStderrTask);
+            await IgnoreCancellationAsync(audioStderrTask);
+            await IgnoreCancellationAsync(audioPumpTask);
+
+            return new ProcessResult(videoDecoder.ExitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
+        }
+        finally
+        {
+            TryKill(videoDecoder);
+            TryKill(audioDecoder);
+            if (audioDecoder is not null)
+            {
+                audioDecoder.Dispose();
             }
         }
     }
@@ -644,6 +787,7 @@ internal sealed class DeckLinkSdkPlayer
         int channels,
         PlaybackPauseController? pauseController,
         Action<string>? logLine,
+        Action<double, double>? audioMeter,
         CancellationToken cancellationToken)
     {
         var bytesPerSampleFrame = checked(channels * AudioBytesPerSample);
@@ -651,6 +795,9 @@ internal sealed class DeckLinkSdkPlayer
         var managedBuffer = new byte[bufferBytes];
         var unmanagedBuffer = Marshal.AllocHGlobal(bufferBytes);
         var totalWritten = 0L;
+        var meterPeakLeft = 0L;
+        var meterPeakRight = 0L;
+        var meterSampleFrames = 0;
 
         try
         {
@@ -673,6 +820,25 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 var sampleFrameCount = bytesRead / bytesPerSampleFrame;
+                if (audioMeter is not null)
+                {
+                    AccumulateMeterPeaks(
+                        managedBuffer,
+                        sampleFrameCount,
+                        bytesPerSampleFrame,
+                        channels,
+                        ref meterPeakLeft,
+                        ref meterPeakRight);
+                    meterSampleFrames += sampleFrameCount;
+                    if (meterSampleFrames >= AudioSampleRate / 10)
+                    {
+                        audioMeter(ToDbfs(meterPeakLeft), ToDbfs(meterPeakRight));
+                        meterPeakLeft = 0;
+                        meterPeakRight = 0;
+                        meterSampleFrames = 0;
+                    }
+                }
+
                 Marshal.Copy(managedBuffer, 0, unmanagedBuffer, bytesRead);
 
                 uint written;
@@ -701,6 +867,108 @@ internal sealed class DeckLinkSdkPlayer
         {
             Marshal.FreeHGlobal(unmanagedBuffer);
         }
+    }
+
+    private static async Task PumpAudioMeterOnlyAsync(
+        Process audioDecoder,
+        int channels,
+        PlaybackPauseController? pauseController,
+        Action<string>? logLine,
+        Action<double, double>? audioMeter,
+        CancellationToken cancellationToken)
+    {
+        var bytesPerSampleFrame = checked(channels * AudioBytesPerSample);
+        var bufferBytes = checked(AudioChunkSampleFrames * bytesPerSampleFrame);
+        var managedBuffer = new byte[bufferBytes];
+        var totalRead = 0L;
+        var meterPeakLeft = 0L;
+        var meterPeakRight = 0L;
+        var meterSampleFrames = 0;
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (pauseController is not null)
+                {
+                    await pauseController.WaitIfPausedAsync(cancellationToken);
+                }
+
+                var bytesRead = await ReadAlignedAudioBlockAsync(
+                    audioDecoder.StandardOutput.BaseStream,
+                    managedBuffer,
+                    bytesPerSampleFrame,
+                    cancellationToken);
+
+                if (bytesRead <= 0)
+                {
+                    break;
+                }
+
+                var sampleFrameCount = bytesRead / bytesPerSampleFrame;
+                if (audioMeter is not null)
+                {
+                    AccumulateMeterPeaks(
+                        managedBuffer,
+                        sampleFrameCount,
+                        bytesPerSampleFrame,
+                        channels,
+                        ref meterPeakLeft,
+                        ref meterPeakRight);
+                    meterSampleFrames += sampleFrameCount;
+                    if (meterSampleFrames >= AudioSampleRate / 10)
+                    {
+                        audioMeter(ToDbfs(meterPeakLeft), ToDbfs(meterPeakRight));
+                        meterPeakLeft = 0;
+                        meterPeakRight = 0;
+                        meterSampleFrames = 0;
+                    }
+                }
+
+                var previousTotal = totalRead;
+                totalRead += sampleFrameCount;
+                if (totalRead / AudioSampleRate != previousTotal / AudioSampleRate)
+                {
+                    logLine?.Invoke($"preview_audio_samples={totalRead}");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during Stop.
+        }
+    }
+
+    private static void AccumulateMeterPeaks(
+        byte[] buffer,
+        int sampleFrameCount,
+        int bytesPerSampleFrame,
+        int channels,
+        ref long peakLeft,
+        ref long peakRight)
+    {
+        for (var sampleFrame = 0; sampleFrame < sampleFrameCount; sampleFrame++)
+        {
+            var baseOffset = sampleFrame * bytesPerSampleFrame;
+            var left = BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(baseOffset, AudioBytesPerSample));
+            var right = channels > 1
+                ? BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(baseOffset + AudioBytesPerSample, AudioBytesPerSample))
+                : left;
+
+            peakLeft = Math.Max(peakLeft, Math.Abs((long)left));
+            peakRight = Math.Max(peakRight, Math.Abs((long)right));
+        }
+    }
+
+    private static double ToDbfs(long peak)
+    {
+        if (peak <= 0)
+        {
+            return -90;
+        }
+
+        var normalized = Math.Min(1.0, peak / (double)int.MaxValue);
+        return Math.Max(-90, 20 * Math.Log10(normalized));
     }
 
     private static async Task<int> ReadAlignedAudioBlockAsync(
@@ -779,6 +1047,56 @@ internal sealed class DeckLinkSdkPlayer
             "60" or "60000/1000" => "60",
             _ => "25",
         };
+    }
+
+    private static (int Width, int Height)? ParseVideoSize(string? videoSize)
+    {
+        if (string.IsNullOrWhiteSpace(videoSize))
+        {
+            return null;
+        }
+
+        var parts = videoSize.Split('x', 'X');
+        if (parts.Length != 2 ||
+            !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var width) ||
+            !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var height) ||
+            width <= 0 ||
+            height <= 0)
+        {
+            return null;
+        }
+
+        return (width, height);
+    }
+
+    private static long GetFrameTicks(string? frameRate)
+    {
+        var fps = ParseFrameRate(frameRate);
+        return Math.Max(1, (long)Math.Round(Stopwatch.Frequency / fps));
+    }
+
+    private static double ParseFrameRate(string? frameRate)
+    {
+        var normalized = NormalizeRateString(frameRate);
+        if (normalized.Contains('/'))
+        {
+            var parts = normalized.Split('/');
+            if (parts.Length == 2 &&
+                double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var numerator) &&
+                double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var denominator) &&
+                numerator > 0 &&
+                denominator > 0)
+            {
+                return numerator / denominator;
+            }
+        }
+
+        if (double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var fps) && fps > 0)
+        {
+            return fps;
+        }
+
+        return 25;
     }
 
     private static string NormalizeRateString(string? frameRate)

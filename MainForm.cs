@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Drawing.Imaging;
 using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace ffmpegplayer;
 
@@ -9,6 +11,27 @@ internal sealed class MainForm : Form
     private const string DefaultMediaRootPath = @"C:\casparcg\_media";
     private const string DefaultDeckLinkDeviceName = "DeckLink SDI 4K";
     private const string DefaultDeckLinkModeCode = "Hi50";
+    private const int FixedClientWidth = 1282;
+    private const int FixedClientHeight = 980;
+    private const int RootPadding = 18;
+    private const int HeaderRowHeight = 62;
+    private const int MainAreaHeight = 764;
+    private const int ActionRowHeight = 110;
+    private const int RemainingTimeRowHeight = 28;
+    private const int CurrentTimeRowHeight = 28;
+    private const int SourcePanelHeight = AppPreviewAreaHeight + ActionRowHeight;
+    private const int ToggleRowHeight = 44;
+    private const int AppPreviewWidth = 640;
+    private const int AppPreviewHeight = 360;
+    private const int AppPreviewAreaHeight = AppPreviewHeight + RemainingTimeRowHeight + CurrentTimeRowHeight;
+    private const int AppAudioMeterColumnWidth = 34;
+    private const int AppAudioMeterPanelWidth = AppAudioMeterColumnWidth * 2;
+    private const int AppPreviewPanelWidth = AppPreviewWidth + AppAudioMeterPanelWidth;
+    private const int PreviewColumnWidth = AppPreviewPanelWidth + 18;
+    private const int SourceColumnWidth = 520;
+    private const int SeekGroupWidth = AppPreviewPanelWidth;
+    private const int TransportSpanWidth = SourceColumnWidth + PreviewColumnWidth;
+    private const int DetailsPanelHeight = 320;
     // In-process FFmpeg decoding can crash the whole GUI with native access violations.
     // Keep the implementation available for an isolated helper process later, but do not call it here.
     private const bool EnableInProcessNativeSeekPreview = false;
@@ -16,6 +39,7 @@ internal sealed class MainForm : Form
     private readonly FfmpegDeckLink _deckLink = new();
     private readonly DeckLinkSdkPlayer _sdkPlayer = new();
     private readonly TextBox _inputPathBox = new();
+    private readonly TextBox _mediaRootPathBox = new();
     private readonly TextBox _mediaSearchBox = new();
     private readonly TreeView _mediaTree = new();
     private readonly ComboBox _deviceBox = new();
@@ -28,14 +52,14 @@ internal sealed class MainForm : Form
     private readonly ComboBox _duplexBox = new();
     private readonly ComboBox _linkBox = new();
     private readonly ComboBox _levelABox = new();
-    private readonly Button _startButton = new();
     private readonly Button _stopButton = new();
     private readonly Button _pauseResumeButton = new();
-    private readonly Button _dryRunButton = new();
-    private readonly Button _testPatternButton = new();
-    private readonly Button _playSelectedMediaButton = new();
     private readonly Button _refreshMediaButton = new();
+    private readonly Button _browseMediaRootButton = new();
     private readonly Button _clearMediaSearchButton = new();
+    private readonly Button _toggleSettingsButton = new();
+    private readonly Button _toggleLogButton = new();
+    private readonly CheckBox _previewOnlyCheckBox = new();
     private readonly Button _refreshDevicesButton = new();
     private readonly Button _refreshModesButton = new();
     private readonly Button _seekBackOneSecondButton = new();
@@ -45,8 +69,13 @@ internal sealed class MainForm : Form
     private readonly Button _seekForwardFiveFramesButton = new();
     private readonly Button _seekForwardOneSecondButton = new();
     private readonly TextBox _logBox = new();
+    private readonly PictureBox _appPreviewBox = new();
+    private readonly AudioMeterBar _leftAudioMeter = new();
+    private readonly AudioMeterBar _rightAudioMeter = new();
     private readonly Label _statusLabel = new();
+    private readonly Label _cpuUsageLabel = new();
     private readonly Label _durationLabel = new();
+    private readonly Label _currentTimeLabel = new();
     private readonly Label _positionStartLabel = new();
     private readonly Label _positionEndLabel = new();
     private readonly TrackBar _positionBar = new();
@@ -54,7 +83,13 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _durationProbeTimer = new() { Interval = 350 };
     private readonly System.Windows.Forms.Timer _playbackPositionTimer = new() { Interval = 500 };
     private readonly System.Windows.Forms.Timer _scrubSeekTimer = new() { Interval = 140 };
+    private readonly System.Windows.Forms.Timer _cpuUsageTimer = new() { Interval = 1000 };
+    private readonly Dictionary<int, TimeSpan> _lastCpuSamples = new();
 
+    private TableLayoutPanel? _settingsSplit;
+    private TableLayoutPanel? _detailsPanelLayout;
+    private Control? _outputSettingsPanel;
+    private Control? _logPanel;
     private CancellationTokenSource? _playbackCancellation;
     private CancellationTokenSource? _mediaSearchCancellation;
     private CancellationTokenSource? _durationProbeCancellation;
@@ -82,9 +117,12 @@ internal sealed class MainForm : Form
     private string? _scrubPreviewPath;
     private string? _scrubPreviewModeCode;
     private string? _scrubPreviewHelperDisabledPath;
+    private string _mediaRootPath = DefaultMediaRootPath;
     private TimeSpan? _pendingScrubPreviewOffset;
     private bool _isPlaying;
     private bool _isPaused;
+    private bool _settingsVisible;
+    private bool _logVisible;
     private bool _nativeSeekPreviewMode;
     private bool _scrubPreviewMode;
     private bool _scrubPreviewLoopRunning;
@@ -98,13 +136,17 @@ internal sealed class MainForm : Form
     private bool _playbackDurationUnavailable;
     private bool _playbackIsStillImage;
     private bool _playbackIsTestPattern;
+    private DateTime _lastCpuSampleAt;
 
     public MainForm()
     {
-        Text = "DeckLink Player";
+        Text = GetExecutableWindowTitle();
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(1080, 720);
-        Size = new Size(1180, 840);
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
+        ClientSize = new Size(FixedClientWidth, FixedClientHeight);
+        MinimumSize = Size;
+        MaximumSize = Size;
         BackColor = Color.FromArgb(22, 25, 29);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
 
@@ -121,6 +163,10 @@ internal sealed class MainForm : Form
         _durationProbeTimer.Tick += DurationProbeTimer_Tick;
         _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
+        _lastCpuSampleAt = DateTime.UtcNow;
+        StoreCpuSamples(CaptureCpuSamples());
+        _cpuUsageTimer.Tick += (_, _) => UpdateCpuUsageLabel();
+        _cpuUsageTimer.Start();
         ScheduleDurationProbe();
 
         Shown += async (_, _) => await RefreshDevicesAsync();
@@ -130,10 +176,18 @@ internal sealed class MainForm : Form
             _mediaSearchCancellation?.Cancel();
             _durationProbeCancellation?.Cancel();
             _scrubSeekTimer.Stop();
+            _cpuUsageTimer.Stop();
             ExitNativeSeekPreviewMode(setStopped: false);
             ExitScrubPreviewMode(holdForReplacement: false, setStopped: false);
+            DisposeAppPreviewImage();
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
         };
+    }
+
+    private static string GetExecutableWindowTitle()
+    {
+        var executableName = Path.GetFileName(Application.ExecutablePath);
+        return string.IsNullOrWhiteSpace(executableName) ? "DeckLink Player" : executableName;
     }
 
     private void BuildUi()
@@ -142,21 +196,19 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
-            Padding = new Padding(18),
+            RowCount = 2,
+            Padding = new Padding(RootPadding),
             BackColor = BackColor,
         };
 
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 430));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, HeaderRowHeight));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, MainAreaHeight + ActionRowHeight));
         Controls.Add(root);
 
         root.Controls.Add(BuildHeader(), 0, 0);
         root.Controls.Add(BuildSettingsArea(), 0, 1);
-        root.Controls.Add(BuildActionBar(), 0, 2);
-        root.Controls.Add(BuildLogPanel(), 0, 3);
+        SetSettingsVisible(false);
+        SetLogVisible(false);
     }
 
     private Control BuildHeader()
@@ -166,80 +218,93 @@ internal sealed class MainForm : Form
         var title = new Label
         {
             Text = "DeckLink Playout",
-            AutoSize = true,
+            AutoSize = false,
+            Size = new Size(292, 38),
             Font = new Font("Segoe UI Semibold", 21F, FontStyle.Bold, GraphicsUnit.Point),
             ForeColor = Color.FromArgb(239, 244, 248),
             Location = new Point(0, 4),
         };
 
         _statusLabel.Text = "Ready";
-        _statusLabel.AutoSize = true;
+        _statusLabel.AutoSize = false;
+        _statusLabel.Size = new Size(520, 18);
         _statusLabel.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
         _statusLabel.ForeColor = Color.FromArgb(130, 210, 164);
-        _statusLabel.Location = new Point(4, 42);
+        _statusLabel.Location = new Point(304, 18);
+
+        _cpuUsageLabel.Text = "CPU 0%";
+        _cpuUsageLabel.AutoSize = false;
+        _cpuUsageLabel.Width = 230;
+        _cpuUsageLabel.Font = new Font("Segoe UI Semibold", 20F, FontStyle.Bold, GraphicsUnit.Point);
+        _cpuUsageLabel.ForeColor = Color.FromArgb(239, 244, 248);
+        _cpuUsageLabel.TextAlign = ContentAlignment.MiddleRight;
+        _cpuUsageLabel.Dock = DockStyle.Right;
+        _cpuUsageLabel.Padding = new Padding(0, 5, 0, 0);
 
         panel.Controls.Add(title);
         panel.Controls.Add(_statusLabel);
+        panel.Controls.Add(_cpuUsageLabel);
         return panel;
     }
 
     private Control BuildSettingsArea()
     {
-        var split = new TableLayoutPanel
+        var area = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 1,
+            RowCount = 4,
             BackColor = BackColor,
             Padding = new Padding(0, 4, 0, 8),
         };
-        split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        area.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, SourceColumnWidth));
+        area.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, PreviewColumnWidth));
+        area.RowStyles.Add(new RowStyle(SizeType.Absolute, AppPreviewAreaHeight));
+        area.RowStyles.Add(new RowStyle(SizeType.Absolute, ActionRowHeight));
+        area.RowStyles.Add(new RowStyle(SizeType.Absolute, ToggleRowHeight));
+        area.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+        _settingsSplit = area;
 
-        split.Controls.Add(BuildSourcePanel(), 0, 0);
-        split.Controls.Add(BuildOutputPanel(), 1, 0);
-        return split;
+        var transport = BuildActionBar();
+        transport.Margin = new Padding(0);
+        transport.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+        var toggles = BuildToggleBar();
+
+        var sourcePanel = BuildSourcePanel();
+        area.Controls.Add(sourcePanel, 0, 0);
+        area.SetRowSpan(sourcePanel, 2);
+        area.Controls.Add(BuildAppPreviewPanel(), 1, 0);
+        area.Controls.Add(transport, 1, 1);
+        area.Controls.Add(toggles, 0, 2);
+        area.SetColumnSpan(toggles, 2);
+        var details = BuildDetailsPanel();
+        area.Controls.Add(details, 0, 3);
+        area.SetColumnSpan(details, 2);
+        return area;
     }
 
     private Control BuildSourcePanel()
     {
         var panel = BuildSection("Source");
+        panel.Dock = DockStyle.None;
+        panel.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+        panel.Size = new Size(SourceColumnWidth - panel.Margin.Horizontal, SourcePanelHeight);
 
         _inputPathBox.PlaceholderText = "Media file to play";
         _inputPathBox.TextChanged += (_, _) => ScheduleDurationProbe();
+        _mediaRootPathBox.Text = _mediaRootPath;
+        _mediaRootPathBox.ReadOnly = true;
 
         var content = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 3,
             BackColor = panel.BackColor,
         };
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        content.Controls.Add(BuildInputRow("Media", _inputPathBox, null), 0, 0);
-
-        _playSelectedMediaButton.Text = "Play Selected";
-        _playSelectedMediaButton.Width = 120;
-        StyleButton(_playSelectedMediaButton, Color.FromArgb(39, 125, 87));
-        _playSelectedMediaButton.Click += async (_, _) => await PlaySelectedMediaNodeAsync(_mediaTree.SelectedNode);
-
-        var checkPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 40,
-            FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(112, 4, 0, 0),
-        };
-        checkPanel.Controls.Add(_playSelectedMediaButton);
-        content.Controls.Add(checkPanel, 0, 1);
-
-        content.Controls.Add(BuildPositionRow(), 0, 2);
 
         _mediaSearchBox.PlaceholderText = "Search media";
         _mediaSearchBox.TextChanged += (_, _) => ScheduleMediaSearch();
@@ -253,7 +318,7 @@ internal sealed class MainForm : Form
             _mediaSearchTimer.Stop();
             LoadMediaTree();
         };
-        content.Controls.Add(BuildInputRow("Search", _mediaSearchBox, _clearMediaSearchButton), 0, 3);
+        content.Controls.Add(BuildInputRow("Search", _mediaSearchBox, _clearMediaSearchButton), 0, 0);
 
         _refreshMediaButton.Text = "Refresh";
         StyleButton(_refreshMediaButton, Color.FromArgb(52, 67, 82));
@@ -268,15 +333,13 @@ internal sealed class MainForm : Form
                 await ApplyMediaSearchAsync(_mediaSearchBox.Text.Trim());
             }
         };
-        var rootPathBox = new TextBox
-        {
-            Text = DefaultMediaRootPath,
-            ReadOnly = true,
-        };
-        content.Controls.Add(BuildInputRow("Library", rootPathBox, _refreshMediaButton), 0, 4);
+        _browseMediaRootButton.Text = "Browse";
+        StyleButton(_browseMediaRootButton, Color.FromArgb(63, 96, 135));
+        _browseMediaRootButton.Click += (_, _) => BrowseMediaRoot();
+        content.Controls.Add(BuildLibraryRow(), 0, 1);
 
         StyleMediaTree();
-        content.Controls.Add(_mediaTree, 0, 5);
+        content.Controls.Add(_mediaTree, 0, 2);
         panel.Controls.Add(content);
 
         return panel;
@@ -285,6 +348,17 @@ internal sealed class MainForm : Form
     private Control BuildOutputPanel()
     {
         var panel = BuildSection("DeckLink Output");
+        var content = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 4,
+            BackColor = panel.BackColor,
+        };
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
 
         _deviceBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _modeBox.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -300,8 +374,8 @@ internal sealed class MainForm : Form
         _deviceBox.SelectedIndexChanged += async (_, _) => await RefreshModesAsync();
         _modeBox.SelectedIndexChanged += (_, _) => ApplySelectedModeToFields();
 
-        panel.Controls.Add(BuildInputRow("Device", _deviceBox, _refreshDevicesButton));
-        panel.Controls.Add(BuildInputRow("Mode", _modeBox, _refreshModesButton));
+        content.Controls.Add(BuildInputRow("Device", _deviceBox, _refreshDevicesButton), 0, 0);
+        content.Controls.Add(BuildInputRow("Mode", _modeBox, _refreshModesButton), 0, 1);
 
         var outputGrid = new TableLayoutPanel
         {
@@ -338,7 +412,7 @@ internal sealed class MainForm : Form
         AddGridField(outputGrid, "Audio", _audioChannelsBox, 0, 1);
         AddGridField(outputGrid, "Preroll", _prerollBox, 2, 1);
 
-        panel.Controls.Add(outputGrid);
+        content.Controls.Add(outputGrid, 0, 2);
 
         var tailGrid = new TableLayoutPanel
         {
@@ -356,9 +430,112 @@ internal sealed class MainForm : Form
         AddGridField(tailGrid, "Duplex", _duplexBox, 2, 0);
         AddGridField(tailGrid, "Link", _linkBox, 0, 1);
         AddGridField(tailGrid, "Level A", _levelABox, 2, 1);
-        panel.Controls.Add(tailGrid);
+        content.Controls.Add(tailGrid, 0, 3);
 
+        panel.Controls.Add(content);
         return panel;
+    }
+
+    private Control BuildDetailsPanel()
+    {
+        var details = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = BackColor,
+            Padding = new Padding(0, 8, 0, 0),
+            Visible = false,
+        };
+        details.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TransportSpanWidth / 2));
+        details.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TransportSpanWidth - TransportSpanWidth / 2));
+        details.RowStyles.Add(new RowStyle(SizeType.Absolute, DetailsPanelHeight));
+        _detailsPanelLayout = details;
+
+        _outputSettingsPanel = BuildOutputPanel();
+        _logPanel = BuildLogPanel();
+        _logPanel.Margin = new Padding(0);
+
+        details.Controls.Add(_outputSettingsPanel, 0, 0);
+        details.Controls.Add(_logPanel, 1, 0);
+        return details;
+    }
+
+    private Control BuildAppPreviewPanel()
+    {
+        var container = new Panel
+        {
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            Size = new Size(AppPreviewPanelWidth, AppPreviewAreaHeight),
+            Margin = new Padding(0, 0, 18, 0),
+            Padding = new Padding(0),
+            BackColor = Color.FromArgb(30, 35, 40),
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 3,
+            BackColor = container.BackColor,
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, AppAudioMeterColumnWidth));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, AppPreviewWidth));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, AppAudioMeterColumnWidth));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, RemainingTimeRowHeight));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, AppPreviewHeight));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, CurrentTimeRowHeight));
+
+        _durationLabel.AutoSize = false;
+        _durationLabel.Dock = DockStyle.Fill;
+        _durationLabel.Margin = new Padding(0);
+        _durationLabel.Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold, GraphicsUnit.Point);
+        _durationLabel.ForeColor = Color.FromArgb(236, 241, 244);
+        _durationLabel.BackColor = Color.FromArgb(30, 35, 40);
+        _durationLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _durationLabel.Text = "--";
+        layout.Controls.Add(_durationLabel, 1, 0);
+
+        ConfigurePreviewAudioMeter(_leftAudioMeter);
+        ConfigurePreviewAudioMeter(_rightAudioMeter);
+        layout.Controls.Add(_leftAudioMeter, 0, 1);
+
+        var previewSurface = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            BackColor = Color.Black,
+        };
+
+        _appPreviewBox.Dock = DockStyle.Fill;
+        _appPreviewBox.BackColor = Color.Black;
+        _appPreviewBox.BorderStyle = BorderStyle.FixedSingle;
+        _appPreviewBox.SizeMode = PictureBoxSizeMode.Zoom;
+        previewSurface.Controls.Add(_appPreviewBox);
+
+        _currentTimeLabel.AutoSize = false;
+        _currentTimeLabel.Dock = DockStyle.Fill;
+        _currentTimeLabel.Margin = new Padding(0);
+        _currentTimeLabel.Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold, GraphicsUnit.Point);
+        _currentTimeLabel.ForeColor = Color.FromArgb(236, 241, 244);
+        _currentTimeLabel.BackColor = Color.FromArgb(30, 35, 40);
+        _currentTimeLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _currentTimeLabel.Text = "--";
+
+        layout.Controls.Add(previewSurface, 1, 1);
+        layout.Controls.Add(_currentTimeLabel, 1, 2);
+        layout.Controls.Add(_rightAudioMeter, 2, 1);
+
+        container.Controls.Add(layout);
+        ResetAudioMeters();
+        return container;
+    }
+
+    private static void ConfigurePreviewAudioMeter(AudioMeterBar meter)
+    {
+        meter.Dock = DockStyle.Fill;
+        meter.Margin = new Padding(0);
     }
 
     private Control BuildPositionRow()
@@ -367,23 +544,13 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 3,
-            RowCount = 3,
-            Padding = new Padding(112, 0, 0, 0),
+            RowCount = 1,
+            Padding = new Padding(0),
         };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        _durationLabel.AutoSize = true;
-        _durationLabel.Dock = DockStyle.Fill;
-        _durationLabel.ForeColor = Color.FromArgb(216, 224, 229);
-        _durationLabel.Font = new Font("Segoe UI Semibold", 9.5F, FontStyle.Bold, GraphicsUnit.Point);
-        _durationLabel.Text = "Duration: -- | Remaining: --";
-        panel.Controls.Add(_durationLabel, 0, 0);
-        panel.SetColumnSpan(_durationLabel, 3);
 
         _positionStartLabel.Text = "0";
         _positionStartLabel.AutoSize = false;
@@ -415,34 +582,9 @@ internal sealed class MainForm : Form
         };
         _positionBar.KeyUp += PositionBar_KeyUp;
 
-        panel.Controls.Add(_positionStartLabel, 0, 1);
-        panel.Controls.Add(_positionBar, 1, 1);
-        panel.Controls.Add(_positionEndLabel, 2, 1);
-
-        var stepPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(0, 2, 0, 0),
-            Margin = new Padding(0),
-        };
-
-        ConfigureSeekStepButton(_seekBackOneSecondButton, "-1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(-1)));
-        ConfigureSeekStepButton(_seekBackFiveFramesButton, "-5 fr", () => SeekRelativeFramesAsync(-5));
-        ConfigureSeekStepButton(_seekBackOneFrameButton, "-1 fr", () => SeekRelativeFramesAsync(-1));
-        ConfigureSeekStepButton(_seekForwardOneFrameButton, "+1 fr", () => SeekRelativeFramesAsync(1));
-        ConfigureSeekStepButton(_seekForwardFiveFramesButton, "+5 fr", () => SeekRelativeFramesAsync(5));
-        ConfigureSeekStepButton(_seekForwardOneSecondButton, "+1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(1)));
-
-        stepPanel.Controls.Add(_seekBackOneSecondButton);
-        stepPanel.Controls.Add(_seekBackFiveFramesButton);
-        stepPanel.Controls.Add(_seekBackOneFrameButton);
-        stepPanel.Controls.Add(_seekForwardOneFrameButton);
-        stepPanel.Controls.Add(_seekForwardFiveFramesButton);
-        stepPanel.Controls.Add(_seekForwardOneSecondButton);
-
-        panel.Controls.Add(stepPanel, 0, 2);
-        panel.SetColumnSpan(stepPanel, 3);
+        panel.Controls.Add(_positionStartLabel, 0, 0);
+        panel.Controls.Add(_positionBar, 1, 0);
+        panel.Controls.Add(_positionEndLabel, 2, 0);
         return panel;
     }
 
@@ -451,7 +593,7 @@ internal sealed class MainForm : Form
         button.Text = text;
         button.Margin = new Padding(0, 0, 6, 0);
         StyleButton(button, Color.FromArgb(52, 67, 82));
-        button.Width = 64;
+        button.Width = 58;
         button.Height = 26;
         button.Enabled = false;
         button.Click += async (_, _) => await RunSeekSafelyAsync(action);
@@ -461,55 +603,213 @@ internal sealed class MainForm : Form
     {
         var panel = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            Size = new Size(SeekGroupWidth, ActionRowHeight),
             FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(0, 10, 0, 8),
+            Padding = new Padding(0, 5, 0, 5),
             BackColor = BackColor,
         };
-
-        _startButton.Text = "Start Playout";
-        StyleButton(_startButton, Color.FromArgb(39, 125, 87));
-        _startButton.Width = 150;
-        _startButton.Click += async (_, _) => await StartPlaybackAsync(dryRun: false);
 
         _stopButton.Text = "Stop";
         StyleButton(_stopButton, Color.FromArgb(149, 64, 58));
         _stopButton.Width = 100;
+        ConfigureTransportButton(_stopButton);
         _stopButton.Enabled = false;
         _stopButton.Click += (_, _) => StopPlayback();
 
         _pauseResumeButton.Text = "Pause";
         StyleButton(_pauseResumeButton, Color.FromArgb(183, 126, 46));
         _pauseResumeButton.Width = 110;
+        ConfigureTransportButton(_pauseResumeButton);
         _pauseResumeButton.Enabled = false;
         _pauseResumeButton.Click += async (_, _) => await TogglePauseResumePlaybackAsync();
 
-        _dryRunButton.Text = "Dry Run";
-        StyleButton(_dryRunButton, Color.FromArgb(52, 67, 82));
-        _dryRunButton.Width = 110;
-        _dryRunButton.Click += async (_, _) => await StartPlaybackAsync(dryRun: true);
+        ConfigureSeekStepButton(_seekBackOneSecondButton, "-1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(-1)));
+        ConfigureSeekStepButton(_seekForwardOneSecondButton, "+1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(1)));
+        ConfigureSeekStepButton(_seekBackFiveFramesButton, "-5 fr", () => SeekRelativeFramesAsync(-5));
+        ConfigureSeekStepButton(_seekForwardFiveFramesButton, "+5 fr", () => SeekRelativeFramesAsync(5));
+        ConfigureSeekStepButton(_seekBackOneFrameButton, "-1 fr", () => SeekRelativeFramesAsync(-1));
+        ConfigureSeekStepButton(_seekForwardOneFrameButton, "+1 fr", () => SeekRelativeFramesAsync(1));
 
-        _testPatternButton.Text = "Moving Test";
-        StyleButton(_testPatternButton, Color.FromArgb(63, 96, 135));
-        _testPatternButton.Width = 118;
-        _testPatternButton.Click += async (_, _) => await StartPlaybackAsync(dryRun: false, useTestPattern: true);
-
-        var clearLogButton = BuildButton("Clear Log");
-        clearLogButton.Width = 110;
-        clearLogButton.Click += (_, _) => _logBox.Clear();
-
-        panel.Controls.Add(_startButton);
-        panel.Controls.Add(_stopButton);
-        panel.Controls.Add(_pauseResumeButton);
-        panel.Controls.Add(_dryRunButton);
-        panel.Controls.Add(_testPatternButton);
-        panel.Controls.Add(clearLogButton);
+        panel.Controls.Add(BuildSeekActionGroup(
+            SeekGroupWidth,
+            new Control[]
+            {
+                _seekBackOneSecondButton,
+                _seekBackFiveFramesButton,
+                _seekBackOneFrameButton,
+            },
+            new Control[]
+            {
+                _stopButton,
+                _pauseResumeButton,
+            },
+            new Control[]
+            {
+                _seekForwardOneFrameButton,
+                _seekForwardFiveFramesButton,
+                _seekForwardOneSecondButton,
+            }));
         return panel;
+    }
+
+    private Control BuildToggleBar()
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            Size = new Size(SeekGroupWidth, ToggleRowHeight),
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0),
+            Padding = new Padding(0, 4, 0, 0),
+            BackColor = BackColor,
+        };
+
+        _toggleSettingsButton.Text = "Show Settings";
+        _toggleSettingsButton.Width = 122;
+        _toggleSettingsButton.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(_toggleSettingsButton, Color.FromArgb(52, 67, 82));
+        _toggleSettingsButton.Click += (_, _) => SetSettingsVisible(!_settingsVisible);
+
+        _toggleLogButton.Text = "Show Log";
+        _toggleLogButton.Width = 100;
+        _toggleLogButton.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(_toggleLogButton, Color.FromArgb(52, 67, 82));
+        _toggleLogButton.Click += (_, _) => SetLogVisible(!_logVisible);
+
+        _previewOnlyCheckBox.Text = "Preview only";
+        _previewOnlyCheckBox.Checked = false;
+        _previewOnlyCheckBox.AutoSize = false;
+        _previewOnlyCheckBox.Size = new Size(128, 34);
+        _previewOnlyCheckBox.Margin = new Padding(0);
+        _previewOnlyCheckBox.TextAlign = ContentAlignment.MiddleLeft;
+        _previewOnlyCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
+        _previewOnlyCheckBox.CheckedChanged += (_, _) =>
+        {
+            SetStatus(_previewOnlyCheckBox.Checked ? "Preview only" : "Ready", _previewOnlyCheckBox.Checked
+                ? Color.FromArgb(232, 181, 105)
+                : Color.FromArgb(130, 210, 164));
+        };
+
+        panel.Controls.Add(_toggleSettingsButton);
+        panel.Controls.Add(_toggleLogButton);
+        panel.Controls.Add(_previewOnlyCheckBox);
+        return panel;
+    }
+
+    private Control BuildActionGroup(int height, params Control[] controls)
+    {
+        var width = controls.Sum(control => control.Width + control.Margin.Horizontal) + 22;
+        var panel = new Panel
+        {
+            Width = width,
+            Height = height,
+            Margin = new Padding(0, 0, 14, 0),
+            BackColor = Color.FromArgb(30, 35, 40),
+            Padding = new Padding(8, 3, 8, 5),
+        };
+
+        var buttonPanel = new FlowLayoutPanel
+        {
+            Location = new Point(8, 27),
+            Size = new Size(width - 16, 38),
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            BackColor = panel.BackColor,
+        };
+
+        buttonPanel.Controls.AddRange(controls);
+        panel.Controls.Add(buttonPanel);
+        return panel;
+    }
+
+    private Control BuildSeekActionGroup(int width, Control[] negativeControls, Control[] transportControls, Control[] positiveControls)
+    {
+        var leftWidth = MeasureControlsWidth(negativeControls);
+        var transportWidth = MeasureControlsWidth(transportControls);
+        var rightWidth = MeasureControlsWidth(positiveControls);
+        var panel = new Panel
+        {
+            Width = width,
+            Height = 92,
+            Margin = new Padding(0),
+            BackColor = Color.FromArgb(30, 35, 40),
+            Padding = new Padding(8, 3, 8, 5),
+        };
+
+        var seekPanel = BuildPositionRow();
+        seekPanel.Location = new Point(8, 5);
+        seekPanel.Size = new Size(width - 16, 39);
+        seekPanel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+
+        var buttonPanel = new Panel
+        {
+            Location = new Point(8, 58),
+            Size = new Size(width - 16, 31),
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            BackColor = panel.BackColor,
+        };
+
+        var leftPanel = BuildSeekButtonPanel(negativeControls, leftWidth);
+        leftPanel.Location = new Point(0, 0);
+
+        var transportPanel = BuildSeekButtonPanel(transportControls, transportWidth);
+        transportPanel.Location = new Point(leftWidth, 0);
+
+        var rightPanel = BuildSeekButtonPanel(positiveControls, rightWidth);
+        rightPanel.Location = new Point(leftWidth + transportWidth, 0);
+
+        var controlsWidth = leftWidth + transportWidth + rightWidth;
+        var centeredX = Math.Max(0, (buttonPanel.Width - controlsWidth) / 2);
+        leftPanel.Location = new Point(centeredX, 0);
+        transportPanel.Location = new Point(centeredX + leftWidth, 0);
+        rightPanel.Location = new Point(centeredX + leftWidth + transportWidth, 0);
+
+        buttonPanel.Controls.Add(leftPanel);
+        buttonPanel.Controls.Add(transportPanel);
+        buttonPanel.Controls.Add(rightPanel);
+        panel.Controls.Add(seekPanel);
+        panel.Controls.Add(buttonPanel);
+        return panel;
+    }
+
+    private static int MeasureControlsWidth(IEnumerable<Control> controls)
+    {
+        return controls.Sum(control => control.Width + control.Margin.Horizontal);
+    }
+
+    private static FlowLayoutPanel BuildSeekButtonPanel(Control[] controls, int width)
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Size = new Size(width, 31),
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            WrapContents = false,
+            BackColor = Color.FromArgb(30, 35, 40),
+        };
+
+        panel.Controls.AddRange(controls);
+        return panel;
+    }
+
+    private static void ConfigureTransportButton(Button button)
+    {
+        button.Height = 31;
+        button.Margin = new Padding(0);
+        button.Padding = new Padding(0);
+        button.TextAlign = ContentAlignment.MiddleCenter;
+        button.UseCompatibleTextRendering = true;
     }
 
     private Control BuildLogPanel()
     {
         var panel = BuildSection("Playback Log");
+        _logPanel = panel;
         panel.Padding = new Padding(14, 44, 14, 14);
 
         _logBox.Dock = DockStyle.Fill;
@@ -526,6 +826,87 @@ internal sealed class MainForm : Form
         return panel;
     }
 
+    private void SetSettingsVisible(bool visible)
+    {
+        _settingsVisible = visible;
+        _toggleSettingsButton.Text = visible ? "Hide Settings" : "Show Settings";
+
+        if (_outputSettingsPanel is not null)
+        {
+            _outputSettingsPanel.Visible = visible;
+        }
+
+        UpdateDetailsPanelVisibility();
+    }
+
+    private void SetLogVisible(bool visible)
+    {
+        _logVisible = visible;
+        _toggleLogButton.Text = visible ? "Hide Log" : "Show Log";
+
+        if (_logPanel is not null)
+        {
+            _logPanel.Visible = visible;
+        }
+
+        UpdateDetailsPanelVisibility();
+    }
+
+    private void UpdateDetailsPanelVisibility()
+    {
+        var anyVisible = _settingsVisible || _logVisible;
+
+        if (_detailsPanelLayout is not null && _detailsPanelLayout.ColumnStyles.Count >= 2)
+        {
+            _detailsPanelLayout.Visible = anyVisible;
+            _detailsPanelLayout.SuspendLayout();
+            try
+            {
+                _detailsPanelLayout.ColumnStyles[0].SizeType = SizeType.Absolute;
+                _detailsPanelLayout.ColumnStyles[1].SizeType = SizeType.Absolute;
+
+                if (_settingsVisible && _logVisible)
+                {
+                    _detailsPanelLayout.ColumnStyles[0].Width = TransportSpanWidth / 2;
+                    _detailsPanelLayout.ColumnStyles[1].Width = TransportSpanWidth - TransportSpanWidth / 2;
+                }
+                else if (_settingsVisible)
+                {
+                    _detailsPanelLayout.ColumnStyles[0].Width = TransportSpanWidth;
+                    _detailsPanelLayout.ColumnStyles[1].Width = 0;
+                }
+                else if (_logVisible)
+                {
+                    _detailsPanelLayout.ColumnStyles[0].Width = 0;
+                    _detailsPanelLayout.ColumnStyles[1].Width = TransportSpanWidth;
+                }
+                else
+                {
+                    _detailsPanelLayout.ColumnStyles[0].Width = 0;
+                    _detailsPanelLayout.ColumnStyles[1].Width = 0;
+                }
+            }
+            finally
+            {
+                _detailsPanelLayout.ResumeLayout(performLayout: true);
+            }
+        }
+
+        if (_settingsSplit is null || _settingsSplit.RowStyles.Count < 4)
+        {
+            return;
+        }
+
+        var detailsRow = _settingsSplit.RowStyles[3];
+        detailsRow.SizeType = SizeType.Absolute;
+        detailsRow.Height = anyVisible ? DetailsPanelHeight : 0;
+        _settingsSplit.PerformLayout();
+    }
+
+    private bool PreviewOnlyMode => _previewOnlyCheckBox.Checked;
+
+    private string PlaybackTargetName => PreviewOnlyMode ? "preview" : "playout";
+
     private Panel BuildSection(string title)
     {
         var panel = new Panel
@@ -539,7 +920,8 @@ internal sealed class MainForm : Form
         var label = new Label
         {
             Text = title,
-            AutoSize = true,
+            AutoSize = false,
+            Size = new Size(220, 22),
             ForeColor = Color.FromArgb(236, 241, 244),
             Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold, GraphicsUnit.Point),
             Location = new Point(14, 12),
@@ -576,6 +958,35 @@ internal sealed class MainForm : Form
             row.Controls.Add(button, 2, 0);
         }
 
+        return row;
+    }
+
+    private Control BuildLibraryRow()
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            ColumnCount = 4,
+            RowCount = 1,
+            Height = 43,
+            Padding = new Padding(0, 3, 0, 3),
+        };
+
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+
+        row.Controls.Add(BuildLabel("Library"), 0, 0);
+        row.Controls.Add(StyleInput(_mediaRootPathBox), 1, 0);
+
+        _browseMediaRootButton.Dock = DockStyle.Fill;
+        _browseMediaRootButton.Margin = new Padding(8, 0, 0, 0);
+        row.Controls.Add(_browseMediaRootButton, 2, 0);
+
+        _refreshMediaButton.Dock = DockStyle.Fill;
+        _refreshMediaButton.Margin = new Padding(8, 0, 0, 0);
+        row.Controls.Add(_refreshMediaButton, 3, 0);
         return row;
     }
 
@@ -631,6 +1042,8 @@ internal sealed class MainForm : Form
         button.ForeColor = Color.White;
         button.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
         button.Cursor = Cursors.Hand;
+        button.Padding = new Padding(0);
+        button.TextAlign = ContentAlignment.MiddleCenter;
     }
 
     private static void StyleCheckBox(CheckBox checkBox)
@@ -660,18 +1073,20 @@ internal sealed class MainForm : Form
     private void LoadMediaTree()
     {
         _mediaSearchCancellation?.Cancel();
+        var mediaRootPath = _mediaRootPath;
+        _mediaRootPathBox.Text = mediaRootPath;
         _mediaTree.BeginUpdate();
         try
         {
             _mediaTree.Nodes.Clear();
-            if (!Directory.Exists(DefaultMediaRootPath))
+            if (!Directory.Exists(mediaRootPath))
             {
-                _mediaTree.Nodes.Add(new TreeNode($"{DefaultMediaRootPath} not found"));
+                _mediaTree.Nodes.Add(new TreeNode($"{mediaRootPath} not found"));
                 SetStatus("Media folder missing", Color.FromArgb(232, 181, 105));
                 return;
             }
 
-            var root = CreateDirectoryNode(DefaultMediaRootPath, DefaultMediaRootPath);
+            var root = CreateDirectoryNode(mediaRootPath, mediaRootPath);
             _mediaTree.Nodes.Add(root);
             LoadDirectoryChildren(root);
             root.Expand();
@@ -686,6 +1101,34 @@ internal sealed class MainForm : Form
         {
             _mediaTree.EndUpdate();
         }
+    }
+
+    private void BrowseMediaRoot()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Choose media library folder",
+            SelectedPath = Directory.Exists(_mediaRootPath) ? _mediaRootPath : DefaultMediaRootPath,
+            UseDescriptionForTitle = true,
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath))
+        {
+            return;
+        }
+
+        ChangeMediaRoot(dialog.SelectedPath);
+    }
+
+    private void ChangeMediaRoot(string path)
+    {
+        _mediaSearchCancellation?.Cancel();
+        _mediaSearchTimer.Stop();
+        _mediaRootPath = path;
+        _mediaRootPathBox.Text = path;
+        _mediaSearchBox.Clear();
+        LoadMediaTree();
+        AppendLog($"Media library changed to {path}");
     }
 
     private void ScheduleMediaSearch()
@@ -710,7 +1153,8 @@ internal sealed class MainForm : Form
             return;
         }
 
-        if (!Directory.Exists(DefaultMediaRootPath))
+        var mediaRootPath = _mediaRootPath;
+        if (!Directory.Exists(mediaRootPath))
         {
             ShowMediaSearchResults(searchText, []);
             SetStatus("Media folder missing", Color.FromArgb(232, 181, 105));
@@ -724,7 +1168,7 @@ internal sealed class MainForm : Form
         {
             SetStatus($"Searching media: {searchText}", Color.FromArgb(126, 188, 226));
             var results = await Task.Run(
-                () => FindMediaFiles(searchText, maxResults: 300, cancellation.Token),
+                () => FindMediaFiles(mediaRootPath, searchText, maxResults: 300, cancellation.Token),
                 cancellation.Token);
 
             if (cancellation.IsCancellationRequested || !string.Equals(_mediaSearchBox.Text.Trim(), searchText, StringComparison.Ordinal))
@@ -1045,6 +1489,7 @@ internal sealed class MainForm : Form
         _playbackDurationUnavailable = false;
         _playbackIsStillImage = false;
         _playbackIsTestPattern = false;
+        ResetAudioMeters();
     }
 
     private void UpdateDurationLabel()
@@ -1058,14 +1503,16 @@ internal sealed class MainForm : Form
         var path = _inputPathBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            _durationLabel.Text = "Duration: -- | Remaining: --";
+            SetRemainingDisplay("--");
+            SetCurrentTimeDisplay("--");
             ResetPositionBar();
             return;
         }
 
         if (IsImageFile(path))
         {
-            _durationLabel.Text = "Still image | Remaining: live";
+            SetRemainingDisplay("LIVE");
+            SetCurrentTimeDisplay("LIVE");
             ResetPositionBar("live");
             return;
         }
@@ -1081,17 +1528,17 @@ internal sealed class MainForm : Form
                 remaining = TimeSpan.Zero;
             }
 
-            _durationLabel.Text = _selectedStartOffset > TimeSpan.Zero
-                ? $"Start: {FormatClock(_selectedStartOffset)} / {FormatClock(duration, roundUp: true)} | Remaining: {FormatClock(remaining, roundUp: true)}"
-                : $"Duration: {FormatClock(duration, roundUp: true)} | Remaining: --";
+            SetRemainingDisplay(remaining);
+            SetCurrentTimeDisplay(_selectedStartOffset);
             UpdatePositionBar(duration, _selectedStartOffset);
             return;
         }
 
-        _durationLabel.Text = _selectedDurationUnavailable &&
+        SetRemainingDisplay(_selectedDurationUnavailable &&
             string.Equals(_selectedDurationPath, path, StringComparison.OrdinalIgnoreCase)
-                ? "Duration: unavailable | Remaining: --"
-                : "Duration: reading... | Remaining: --";
+                ? "UNAVAILABLE"
+                : "READING");
+        SetCurrentTimeDisplay("--");
         ResetPositionBar();
     }
 
@@ -1106,24 +1553,24 @@ internal sealed class MainForm : Form
 
         if (_playbackIsTestPattern)
         {
-            _durationLabel.Text = $"Test signal: {FormatClock(elapsedSinceDecoderStart)} | Remaining: live";
+            SetRemainingDisplay("LIVE");
+            SetCurrentTimeDisplay("LIVE");
             ResetPositionBar("live");
             return;
         }
 
         if (_playbackIsStillImage)
         {
-            _durationLabel.Text = $"Still image: {FormatClock(elapsedSinceDecoderStart)} | Remaining: live";
+            SetRemainingDisplay("LIVE");
+            SetCurrentTimeDisplay("LIVE");
             ResetPositionBar("live");
             return;
         }
 
         if (!_playbackDuration.HasValue)
         {
-            var elapsed = _playbackStartOffset + elapsedSinceDecoderStart;
-            _durationLabel.Text = _playbackDurationUnavailable
-                ? $"Playing: {FormatClock(elapsed)} | Duration: unavailable"
-                : $"Playing: {FormatClock(elapsed)} | Duration: reading...";
+            SetRemainingDisplay(_playbackDurationUnavailable ? "UNAVAILABLE" : "READING");
+            SetCurrentTimeDisplay("--");
             ResetPositionBar();
             return;
         }
@@ -1144,8 +1591,29 @@ internal sealed class MainForm : Form
             remaining = TimeSpan.Zero;
         }
 
-        _durationLabel.Text = $"File: {FormatClock(position)} / {FormatClock(duration, roundUp: true)} | Remaining: {FormatClock(remaining, roundUp: true)}";
+        SetRemainingDisplay(remaining);
+        SetCurrentTimeDisplay(position);
         UpdatePositionBar(duration, position);
+    }
+
+    private void SetRemainingDisplay(TimeSpan remaining)
+    {
+        SetRemainingDisplay(FormatClock(remaining, roundUp: true));
+    }
+
+    private void SetRemainingDisplay(string text)
+    {
+        _durationLabel.Text = text;
+    }
+
+    private void SetCurrentTimeDisplay(TimeSpan position)
+    {
+        SetCurrentTimeDisplay(FormatClock(position));
+    }
+
+    private void SetCurrentTimeDisplay(string text)
+    {
+        _currentTimeLabel.Text = text;
     }
 
     private async void PositionBar_MouseDown(object? sender, MouseEventArgs e)
@@ -1256,7 +1724,11 @@ internal sealed class MainForm : Form
             SetStatus("Starting scrub preview", Color.FromArgb(126, 188, 226));
 
             var stoppedTask = _playbackStoppedSignal?.Task;
-            PreserveVideoOutputForReplacement();
+            if (!PreviewOnlyMode)
+            {
+                PreserveVideoOutputForReplacement();
+            }
+
             StopPlayback();
             if (stoppedTask is not null)
             {
@@ -1266,6 +1738,7 @@ internal sealed class MainForm : Form
             _scrubPreviewMode = true;
             _isPaused = true;
             SetPlaying(true);
+            ResetAudioMeters();
             _pauseResumeButton.Text = "Resume";
             SetStatus("Scrub preview", Color.FromArgb(232, 181, 105));
         }
@@ -1290,7 +1763,7 @@ internal sealed class MainForm : Form
             ? $"Leaving scrub preview paused at {FormatClock(target)}..."
             : $"Leaving scrub preview and playing from {FormatClock(target)}...");
 
-        ExitScrubPreviewMode(holdForReplacement: true, setStopped: true);
+        ExitScrubPreviewMode(holdForReplacement: !PreviewOnlyMode, setStopped: true);
         await StartPlaybackAsync(dryRun: false, startOffset: target, startPaused: shouldRemainPaused);
     }
 
@@ -1340,7 +1813,11 @@ internal sealed class MainForm : Form
         var size = ParseVideoSize(request.VideoSize)
             ?? throw new InvalidOperationException("Choose a valid DeckLink output size before scrubbing.");
 
-        EnsureScrubPreviewOutput(request);
+        if (!PreviewOnlyMode)
+        {
+            EnsureScrubPreviewOutput(request);
+        }
+
         UpdateScrubPreviewClock(request, target);
 
         var decodeTimedOut = false;
@@ -1363,7 +1840,7 @@ internal sealed class MainForm : Form
             var frame = await DecodeScrubPreviewFrameAsync(request, size.Width, size.Height, target, decodeCancellation.Token);
             if (!decodeCancellation.IsCancellationRequested && _scrubPreviewMode)
             {
-                DisplayDecodedScrubPreviewFrame(frame, target);
+                DisplayDecodedScrubPreviewFrame(frame, size.Width, size.Height, target);
             }
         }
         catch (OperationCanceledException)
@@ -1381,7 +1858,7 @@ internal sealed class MainForm : Form
                         size.Width,
                         size.Height,
                         fallbackCancellation.Token);
-                    DisplayDecodedScrubPreviewFrame(fallbackFrame, target);
+                    DisplayDecodedScrubPreviewFrame(fallbackFrame, size.Width, size.Height, target);
                 }
                 catch (Exception ex)
                 {
@@ -1404,16 +1881,170 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void DisplayDecodedScrubPreviewFrame(byte[] frame, TimeSpan target)
+    private void DisplayDecodedScrubPreviewFrame(byte[] frame, int width, int height, TimeSpan target)
     {
         if (!_scrubPreviewMode)
         {
             return;
         }
 
-        _scrubPreviewOutput!.DisplayFrame(frame);
+        if (!PreviewOnlyMode)
+        {
+            _scrubPreviewOutput!.DisplayFrame(frame);
+        }
+
+        UpdateAppPreviewFrame(frame, width, height);
         SetStatus($"Scrub {FormatClock(target)}", Color.FromArgb(232, 181, 105));
         UpdateDurationLabel();
+    }
+
+    private void UpdateAppPreviewFrame(byte[] uyvyFrame, int width, int height)
+    {
+        if (IsDisposed || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var bitmap = CreatePreviewBitmap(uyvyFrame, width, height, AppPreviewWidth, AppPreviewHeight);
+            SetAppPreviewImage(bitmap);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"App preview frame skipped: {ex.Message}");
+        }
+    }
+
+    private void SetAppPreviewImage(Bitmap bitmap)
+    {
+        if (IsDisposed)
+        {
+            bitmap.Dispose();
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(() => SetAppPreviewImage(bitmap));
+            }
+            catch
+            {
+                bitmap.Dispose();
+            }
+
+            return;
+        }
+
+        var previous = _appPreviewBox.Image;
+        _appPreviewBox.Image = bitmap;
+        previous?.Dispose();
+    }
+
+    private void DisposeAppPreviewImage()
+    {
+        var image = _appPreviewBox.Image;
+        _appPreviewBox.Image = null;
+        image?.Dispose();
+    }
+
+    private void UpdateAudioMeters(double leftDbfs, double rightDbfs)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(() => UpdateAudioMeters(leftDbfs, rightDbfs));
+            }
+            catch
+            {
+                // The form may be closing while the audio decoder is shutting down.
+            }
+
+            return;
+        }
+
+        SetAudioMeter(_leftAudioMeter, leftDbfs);
+        SetAudioMeter(_rightAudioMeter, rightDbfs);
+    }
+
+    private void ResetAudioMeters()
+    {
+        UpdateAudioMeters(-90, -90);
+    }
+
+    private static void SetAudioMeter(AudioMeterBar meter, double dbfs)
+    {
+        meter.Dbfs = dbfs;
+    }
+
+    private static Bitmap CreatePreviewBitmap(byte[] uyvyFrame, int sourceWidth, int sourceHeight, int previewWidth, int previewHeight)
+    {
+        if (uyvyFrame.Length < checked(sourceWidth * sourceHeight * 2))
+        {
+            throw new InvalidOperationException("UYVY preview frame is smaller than expected.");
+        }
+
+        var bitmap = new Bitmap(previewWidth, previewHeight, PixelFormat.Format24bppRgb);
+        var bounds = new Rectangle(0, 0, previewWidth, previewHeight);
+        var data = bitmap.LockBits(bounds, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+        try
+        {
+            var rgb = new byte[data.Stride * previewHeight];
+            for (var y = 0; y < previewHeight; y++)
+            {
+                var sourceY = Math.Min(sourceHeight - 1, y * sourceHeight / previewHeight);
+                var rowOffset = y * data.Stride;
+                for (var x = 0; x < previewWidth; x++)
+                {
+                    var sourceX = Math.Min(sourceWidth - 1, x * sourceWidth / previewWidth);
+                    var pairX = sourceX & ~1;
+                    var sourceOffset = (sourceY * sourceWidth + pairX) * 2;
+                    var u = uyvyFrame[sourceOffset];
+                    var v = uyvyFrame[sourceOffset + 2];
+                    var yValue = uyvyFrame[sourceOffset + (sourceX == pairX ? 1 : 3)];
+                    ConvertYuvToRgb(yValue, u, v, out var r, out var g, out var b);
+
+                    var destination = rowOffset + x * 3;
+                    rgb[destination] = b;
+                    rgb[destination + 1] = g;
+                    rgb[destination + 2] = r;
+                }
+            }
+
+            Marshal.Copy(rgb, 0, data.Scan0, rgb.Length);
+        }
+        catch
+        {
+            bitmap.UnlockBits(data);
+            bitmap.Dispose();
+            throw;
+        }
+
+        bitmap.UnlockBits(data);
+        return bitmap;
+    }
+
+    private static void ConvertYuvToRgb(byte yValue, byte uValue, byte vValue, out byte r, out byte g, out byte b)
+    {
+        var c = yValue - 16;
+        var d = uValue - 128;
+        var e = vValue - 128;
+        r = ClampToByte((298 * c + 409 * e + 128) >> 8);
+        g = ClampToByte((298 * c - 100 * d - 208 * e + 128) >> 8);
+        b = ClampToByte((298 * c + 516 * d + 128) >> 8);
+    }
+
+    private static byte ClampToByte(int value)
+    {
+        return (byte)Math.Clamp(value, 0, 255);
     }
 
     private void EnsureScrubPreviewOutput(PlayRequest request)
@@ -1632,7 +2263,8 @@ internal sealed class MainForm : Form
             remaining = TimeSpan.Zero;
         }
 
-        _durationLabel.Text = $"Seek: {FormatClock(target)} / {FormatClock(duration.Value, roundUp: true)} | Remaining: {FormatClock(remaining, roundUp: true)}";
+        SetRemainingDisplay(remaining);
+        SetCurrentTimeDisplay(target);
     }
 
     private async Task SeekToPositionBarValueAsync()
@@ -1892,7 +2524,8 @@ internal sealed class MainForm : Form
         _switchingPlayback = true;
         try
         {
-            AppendLog($"Seeking playout to {FormatClock(target)}...");
+            var targetName = PlaybackTargetName;
+            AppendLog($"Seeking {targetName} to {FormatClock(target)}...");
             SetStatus($"Seeking to {FormatClock(target)}", Color.FromArgb(126, 188, 226));
 
             var stoppedTask = _playbackStoppedSignal?.Task;
@@ -1904,8 +2537,8 @@ internal sealed class MainForm : Form
             }
 
             AppendLog(shouldRemainPaused
-                ? $"Starting paused playout from {FormatClock(target)}..."
-                : $"Starting playout from {FormatClock(target)}...");
+                ? $"Starting paused {targetName} from {FormatClock(target)}..."
+                : $"Starting {targetName} from {FormatClock(target)}...");
             _ = StartPlaybackAsync(dryRun: false, startOffset: target, startPaused: shouldRemainPaused);
         }
         finally
@@ -2033,6 +2666,7 @@ internal sealed class MainForm : Form
         _positionBar.Value = 0;
         _positionStartLabel.Text = "0";
         _positionEndLabel.Text = endText;
+        SetCurrentTimeDisplay(string.Equals(endText, "live", StringComparison.OrdinalIgnoreCase) ? "LIVE" : "--");
     }
 
     private void UpdatePositionBar(TimeSpan duration, TimeSpan position)
@@ -2060,6 +2694,7 @@ internal sealed class MainForm : Form
 
         _positionStartLabel.Text = "0";
         _positionEndLabel.Text = FormatClock(duration, roundUp: true);
+        SetCurrentTimeDisplay(position);
     }
 
     private void SetSeekControlsEnabled(bool enabled)
@@ -2118,8 +2753,9 @@ internal sealed class MainForm : Form
         _switchingPlayback = true;
         try
         {
+            var targetName = PlaybackTargetName;
             var nextFile = Path.GetFileName(_inputPathBox.Text);
-            AppendLog($"Switching playout to {nextFile}...");
+            AppendLog($"Switching {targetName} to {nextFile}...");
             SetStatus($"Switching to {nextFile}", Color.FromArgb(126, 188, 226));
 
             var stoppedTask = _playbackStoppedSignal?.Task;
@@ -2131,7 +2767,7 @@ internal sealed class MainForm : Form
             }
 
             nextFile = Path.GetFileName(_inputPathBox.Text);
-            AppendLog($"Starting switched playout: {nextFile}...");
+            AppendLog($"Starting switched {targetName}: {nextFile}...");
             _ = StartPlaybackAsync(dryRun: false);
         }
         finally
@@ -2198,11 +2834,15 @@ internal sealed class MainForm : Form
         return ImageExtensions.Contains(Path.GetExtension(path));
     }
 
-    private static IReadOnlyList<string> FindMediaFiles(string searchText, int maxResults, CancellationToken cancellationToken)
+    private IReadOnlyList<string> FindMediaFiles(
+        string mediaRootPath,
+        string searchText,
+        int maxResults,
+        CancellationToken cancellationToken)
     {
         var results = new List<string>();
         var pendingDirectories = new Stack<string>();
-        pendingDirectories.Push(DefaultMediaRootPath);
+        pendingDirectories.Push(mediaRootPath);
 
         while (pendingDirectories.Count > 0 && results.Count < maxResults)
         {
@@ -2245,11 +2885,11 @@ internal sealed class MainForm : Form
             .ToList();
     }
 
-    private static string GetMediaDisplayPath(string path)
+    private string GetMediaDisplayPath(string path)
     {
         try
         {
-            return Path.GetRelativePath(DefaultMediaRootPath, path);
+            return Path.GetRelativePath(_mediaRootPath, path);
         }
         catch
         {
@@ -2347,6 +2987,7 @@ internal sealed class MainForm : Form
 
         try
         {
+            var previewOnly = PreviewOnlyMode;
             var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset);
             var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
             request = _deckLink.ApplyModeDefaults(request, selectedMode);
@@ -2354,11 +2995,13 @@ internal sealed class MainForm : Form
 
             AppendLog("");
             AppendLog("Command:");
-            AppendLog("SDK decoder command:");
+            AppendLog(previewOnly ? "Preview-only decoder command:" : "SDK decoder command:");
             AppendLog(commandText);
-            AppendLog(request.NoAudio
-                ? "DeckLink output: Blackmagic SDK direct video frames."
-                : "DeckLink output: Blackmagic SDK direct video frames with embedded audio.");
+            AppendLog(previewOnly
+                ? "DeckLink output disabled: app preview only."
+                : request.NoAudio
+                    ? "DeckLink output: Blackmagic SDK direct video frames."
+                    : "DeckLink output: Blackmagic SDK direct video frames with embedded audio.");
 
             if (dryRun)
             {
@@ -2377,7 +3020,9 @@ internal sealed class MainForm : Form
             _playbackStoppedSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             SetPlaying(true);
             StartPlaybackClock(request, startPaused);
-            AppendLog(startPaused ? "Starting playout paused..." : "Starting playout...");
+            AppendLog(startPaused
+                ? previewOnly ? "Starting preview paused..." : "Starting playout paused..."
+                : previewOnly ? "Starting preview..." : "Starting playout...");
             if (startPaused)
             {
                 SetStatus("Paused", Color.FromArgb(232, 181, 105));
@@ -2400,19 +3045,35 @@ internal sealed class MainForm : Form
             }
 
             LogPlaybackLine("Command:");
-            LogPlaybackLine("SDK decoder command:");
+            LogPlaybackLine(previewOnly ? "Preview-only decoder command:" : "SDK decoder command:");
             LogPlaybackLine(commandText);
 
             var result = await Task.Run(
-                () => _sdkPlayer.PlayAsync(
-                    request,
-                    LogPlaybackLine,
-                    _playbackCancellation.Token,
-                    pauseController,
-                    renderInitialFrameWhilePaused: startPaused),
+                () => previewOnly
+                    ? _sdkPlayer.PlayPreviewOnlyAsync(
+                        request,
+                        LogPlaybackLine,
+                        _playbackCancellation.Token,
+                        pauseController,
+                        renderInitialFrameWhilePaused: startPaused,
+                        previewFrame: UpdateAppPreviewFrame,
+                        audioMeter: UpdateAudioMeters)
+                    : _sdkPlayer.PlayAsync(
+                        request,
+                        LogPlaybackLine,
+                        _playbackCancellation.Token,
+                        pauseController,
+                        renderInitialFrameWhilePaused: startPaused,
+                        previewFrame: UpdateAppPreviewFrame,
+                        previewFrameInterval: 5,
+                        audioMeter: UpdateAudioMeters),
                 _playbackCancellation.Token);
 
-            AppendLog(result.Cancelled ? "Playback stopped." : $"DeckLink SDK engine exited with code {result.ExitCode}.");
+            AppendLog(result.Cancelled
+                ? "Playback stopped."
+                : previewOnly
+                    ? $"Preview engine exited with code {result.ExitCode}."
+                    : $"DeckLink SDK engine exited with code {result.ExitCode}.");
             SetStatus(result.Cancelled ? "Stopped" : $"Exited with code {result.ExitCode}", result.ExitCode == 0
                 ? Color.FromArgb(130, 210, 164)
                 : Color.FromArgb(232, 181, 105));
@@ -2462,13 +3123,18 @@ internal sealed class MainForm : Form
             return;
         }
 
-        AppendLog("Stopping playout...");
+        AppendLog($"Stopping {PlaybackTargetName}...");
         _playbackCancellation?.Cancel();
         _playbackPauseController?.Resume();
     }
 
     private void PreserveVideoOutputForReplacement()
     {
+        if (PreviewOnlyMode)
+        {
+            return;
+        }
+
         if (_playbackPauseController is null)
         {
             return;
@@ -2559,7 +3225,8 @@ internal sealed class MainForm : Form
             throw new InvalidOperationException($"Media file not found: {inputPath}");
         }
 
-        if (_deviceBox.SelectedItem is null)
+        var previewOnly = PreviewOnlyMode;
+        if (_deviceBox.SelectedItem is null && !previewOnly)
         {
             throw new InvalidOperationException("Choose a DeckLink output device.");
         }
@@ -2584,13 +3251,23 @@ internal sealed class MainForm : Form
 
         var levelA = ParseOptionalBool(_levelABox.SelectedItem?.ToString());
 
-        var selectedDevice = GetSelectedDevice();
-        if (selectedDevice.Contains("SDI 4K", StringComparison.OrdinalIgnoreCase))
+        var selectedDevice = previewOnly
+            ? _deviceBox.SelectedItem?.ToString() ?? "Preview Only"
+            : GetSelectedDevice();
+        if (!previewOnly && selectedDevice.Contains("SDI 4K", StringComparison.OrdinalIgnoreCase))
         {
             duplexMode = null;
         }
 
         var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
+        var videoSize = EmptyToNull(_videoSizeBox.Text);
+        var frameRate = EmptyToNull(_frameRateBox.Text);
+        if (previewOnly)
+        {
+            videoSize ??= selectedMode is not null ? $"{selectedMode.Width}x{selectedMode.Height}" : "1920x1080";
+            frameRate ??= selectedMode?.FrameRate ?? "25000/1000";
+        }
+
         var isStillImage = IsImageFile(inputPath);
         var normalizedStartOffset = useTestPattern || isStillImage
             ? TimeSpan.Zero
@@ -2601,8 +3278,8 @@ internal sealed class MainForm : Form
             inputPath,
             selectedDevice,
             selectedMode?.Code,
-            EmptyToNull(_videoSizeBox.Text),
-            EmptyToNull(_frameRateBox.Text),
+            videoSize,
+            frameRate,
             EmptyToNull(_pixelFormatBox.Text) ?? FfmpegDeckLink.DefaultPixelFormat,
             audioChannels,
             (double)_prerollBox.Value,
@@ -2752,17 +3429,16 @@ internal sealed class MainForm : Form
     private void SetPlaying(bool isPlaying)
     {
         _isPlaying = isPlaying;
-        _startButton.Enabled = !isPlaying;
-        _dryRunButton.Enabled = !isPlaying;
         _stopButton.Enabled = isPlaying;
         _pauseResumeButton.Enabled = isPlaying;
         _refreshDevicesButton.Enabled = !isPlaying;
         _refreshModesButton.Enabled = !isPlaying;
-        _testPatternButton.Enabled = !isPlaying;
-        _playSelectedMediaButton.Enabled = true;
         _refreshMediaButton.Enabled = !isPlaying;
+        _browseMediaRootButton.Enabled = true;
+        _mediaRootPathBox.Enabled = true;
         _mediaSearchBox.Enabled = true;
         _clearMediaSearchButton.Enabled = true;
+        _previewOnlyCheckBox.Enabled = !isPlaying;
         _mediaTree.Enabled = true;
         if (!isPlaying)
         {
@@ -2778,14 +3454,13 @@ internal sealed class MainForm : Form
     {
         _refreshDevicesButton.Enabled = enabled;
         _refreshModesButton.Enabled = enabled;
-        _startButton.Enabled = enabled && !_isPlaying;
-        _dryRunButton.Enabled = enabled && !_isPlaying;
-        _testPatternButton.Enabled = enabled && !_isPlaying;
         _pauseResumeButton.Enabled = _isPlaying;
-        _playSelectedMediaButton.Enabled = enabled;
         _refreshMediaButton.Enabled = enabled && !_isPlaying;
+        _browseMediaRootButton.Enabled = enabled;
+        _mediaRootPathBox.Enabled = enabled;
         _mediaSearchBox.Enabled = enabled;
         _clearMediaSearchButton.Enabled = enabled;
+        _previewOnlyCheckBox.Enabled = enabled && !_isPlaying;
         _mediaTree.Enabled = enabled;
         _stopButton.Enabled = _isPlaying;
     }
@@ -2794,6 +3469,111 @@ internal sealed class MainForm : Form
     {
         _statusLabel.Text = text;
         _statusLabel.ForeColor = color;
+    }
+
+    private void UpdateCpuUsageLabel()
+    {
+        var now = DateTime.UtcNow;
+        var elapsedMilliseconds = (now - _lastCpuSampleAt).TotalMilliseconds;
+        var samples = CaptureCpuSamples();
+
+        if (elapsedMilliseconds <= 0 || _lastCpuSamples.Count == 0)
+        {
+            StoreCpuSamples(samples);
+            _lastCpuSampleAt = now;
+            return;
+        }
+
+        var cpuMilliseconds = 0d;
+        foreach (var (processId, totalProcessorTime) in samples)
+        {
+            if (_lastCpuSamples.TryGetValue(processId, out var previousProcessorTime) &&
+                totalProcessorTime >= previousProcessorTime)
+            {
+                cpuMilliseconds += (totalProcessorTime - previousProcessorTime).TotalMilliseconds;
+            }
+        }
+
+        StoreCpuSamples(samples);
+        _lastCpuSampleAt = now;
+
+        var cpuPercent = cpuMilliseconds / elapsedMilliseconds / Environment.ProcessorCount * 100d;
+        cpuPercent = Math.Clamp(cpuPercent, 0d, 999d);
+        _cpuUsageLabel.Text = $"CPU {cpuPercent:0}%";
+    }
+
+    private Dictionary<int, TimeSpan> CaptureCpuSamples()
+    {
+        var samples = new Dictionary<int, TimeSpan>();
+
+        using (var currentProcess = Process.GetCurrentProcess())
+        {
+            AddCpuSample(samples, currentProcess);
+        }
+
+        string? ffmpegPath = null;
+        try
+        {
+            ffmpegPath = Path.GetFullPath(GetFfmpegPath());
+        }
+        catch
+        {
+            // CPU display should never interrupt playback if the path cannot be resolved.
+        }
+
+        if (!string.IsNullOrWhiteSpace(ffmpegPath))
+        {
+            foreach (var process in Process.GetProcessesByName("ffmpeg"))
+            {
+                using (process)
+                {
+                    if (IsBundledFfmpegProcess(process, ffmpegPath))
+                    {
+                        AddCpuSample(samples, process);
+                    }
+                }
+            }
+        }
+
+        return samples;
+    }
+
+    private void StoreCpuSamples(Dictionary<int, TimeSpan> samples)
+    {
+        _lastCpuSamples.Clear();
+        foreach (var (processId, totalProcessorTime) in samples)
+        {
+            _lastCpuSamples[processId] = totalProcessorTime;
+        }
+    }
+
+    private static void AddCpuSample(Dictionary<int, TimeSpan> samples, Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                samples[process.Id] = process.TotalProcessorTime;
+            }
+        }
+        catch
+        {
+            // Process may exit while sampling; ignore this one tick.
+        }
+    }
+
+    private static bool IsBundledFfmpegProcess(Process process, string ffmpegPath)
+    {
+        try
+        {
+            var processPath = process.MainModule?.FileName;
+            return !string.IsNullOrWhiteSpace(processPath) &&
+                string.Equals(Path.GetFullPath(processPath), ffmpegPath, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void AppendLog(string line)
