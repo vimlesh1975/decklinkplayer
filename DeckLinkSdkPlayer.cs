@@ -143,7 +143,7 @@ internal sealed class DeckLinkSdkPlayer
                     _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
 
                 audioOutputEnabled = true;
-                audioDecoder = StartAudioDecoder(request, throttleRealtime: true);
+                audioDecoder = StartAudioDecoder(request, throttleRealtime: false);
                 audioStderrTask = Task.Run(
                     () => PumpErrorAsync(audioDecoder, "audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
@@ -737,13 +737,7 @@ internal sealed class DeckLinkSdkPlayer
         args.Add("0:v:0");
         args.Add("-an");
         args.Add("-vf");
-        args.Add("format=uyvy422");
-
-        if (!string.IsNullOrWhiteSpace(request.FrameRate))
-        {
-            args.Add("-r");
-            args.Add(request.FrameRate);
-        }
+        args.Add(BuildVideoFilter(request));
 
         if (!string.IsNullOrWhiteSpace(request.VideoSize))
         {
@@ -795,6 +789,8 @@ internal sealed class DeckLinkSdkPlayer
         args.Add("-map");
         args.Add("0:a:0");
         args.Add("-vn");
+        args.Add("-af");
+        args.Add("aresample=async=1000:first_pts=0");
         args.Add("-ac");
         args.Add(request.AudioChannels.ToString(CultureInfo.InvariantCulture));
         args.Add("-ar");
@@ -805,6 +801,22 @@ internal sealed class DeckLinkSdkPlayer
         args.Add("s32le");
         args.Add("pipe:1");
         return args;
+    }
+
+    private static string BuildVideoFilter(PlayRequest request)
+    {
+        var filters = new List<string>
+        {
+            "setpts=PTS-STARTPTS",
+        };
+
+        if (!string.IsNullOrWhiteSpace(request.FrameRate))
+        {
+            filters.Add($"fps={NormalizeRateString(request.FrameRate)}:start_time=0");
+        }
+
+        filters.Add("format=uyvy422");
+        return string.Join(",", filters);
     }
 
     private static IReadOnlyList<string> BuildPcAudioMonitorArguments(PlayRequest request)

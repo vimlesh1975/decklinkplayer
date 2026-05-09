@@ -3032,7 +3032,7 @@ internal sealed class MainForm : Form
             request = _deckLink.ApplyModeDefaults(request, selectedMode);
             var commandText = _sdkPlayer.FormatDecoderCommand(
                 request,
-                throttleAudioRealtime: true,
+                throttleAudioRealtime: previewOnly,
                 monitorPcAudio: pcAudio);
 
             AppendLog("");
