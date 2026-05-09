@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Globalization;
+using System.Text;
 
 namespace ffmpegplayer;
 
@@ -23,6 +25,8 @@ internal static class Cli
                 "formats" => await RunFormatsAsync(ParseFormatsOptions(args[1..])),
                 "play" => await RunPlayAsync(ParsePlayOptions(args[1..], dryRun: false)),
                 "dry-run" => await RunPlayAsync(ParsePlayOptions(args[1..], dryRun: true)),
+                "native-probe" => RunNativeProbe(args[1..]),
+                "preview-helper" => await RunPreviewHelperAsync(ParsePreviewHelperOptions(args[1..])),
                 _ => Fail($"Unknown command '{args[0]}'."),
             };
         }
@@ -80,6 +84,64 @@ internal static class Cli
 
         var result = await SdkPlayer.PlayAsync(request, Console.Error.WriteLine);
         return result.ExitCode;
+    }
+
+    private static int RunNativeProbe(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            throw new InvalidOperationException("native-probe needs a media file path.");
+        }
+
+        var inputPath = args[0];
+        var seconds = args.Length > 1 && double.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : 1;
+
+        using var decoder = new NativeFfmpegFrameDecoder(inputPath, 1920, 1080);
+        var frame = decoder.DecodeFrame(TimeSpan.FromSeconds(seconds));
+        Console.WriteLine($"Native FFmpeg decoded {frame.Length} bytes at {seconds.ToString(CultureInfo.InvariantCulture)}s.");
+        return 0;
+    }
+
+    private static async Task<int> RunPreviewHelperAsync(PreviewHelperOptions options)
+    {
+        using var decoder = new NativeFfmpegFrameDecoder(options.InputPath, options.Width, options.Height);
+        var input = Console.OpenStandardInput();
+        var output = Console.OpenStandardOutput();
+        using var reader = new StreamReader(input, Encoding.UTF8);
+
+        while (await reader.ReadLineAsync() is { } line)
+        {
+            var command = line.Trim();
+            if (command.Length == 0)
+            {
+                continue;
+            }
+
+            if (string.Equals(command, "quit", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            if (!double.TryParse(command, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+            {
+                await WritePreviewErrorAsync(output, $"Invalid preview seek time '{command}'.");
+                continue;
+            }
+
+            try
+            {
+                var frame = decoder.DecodeFrame(TimeSpan.FromSeconds(seconds));
+                await WritePreviewFrameAsync(output, frame);
+            }
+            catch (Exception ex)
+            {
+                await WritePreviewErrorAsync(output, ex.Message);
+            }
+        }
+
+        return 0;
     }
 
     private static CommonOptions ParseDevicesOptions(string[] args)
@@ -271,6 +333,71 @@ internal static class Cli
         return new PlayOptions(request, dryRun);
     }
 
+    private static PreviewHelperOptions ParsePreviewHelperOptions(string[] args)
+    {
+        string? input = null;
+        int? width = null;
+        int? height = null;
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            var token = args[i];
+            var (name, inlineValue) = SplitOption(token);
+            switch (name)
+            {
+                case "--input":
+                    input = inlineValue ?? ReadNextValue(args, ref i, name);
+                    break;
+                case "--width":
+                    width = int.Parse(inlineValue ?? ReadNextValue(args, ref i, name), CultureInfo.InvariantCulture);
+                    break;
+                case "--height":
+                    height = int.Parse(inlineValue ?? ReadNextValue(args, ref i, name), CultureInfo.InvariantCulture);
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unknown option for preview-helper: {token}");
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            throw new InvalidOperationException("The preview-helper command requires --input.");
+        }
+
+        if (!File.Exists(input))
+        {
+            throw new InvalidOperationException($"Input file not found: {input}");
+        }
+
+        if (width is null or <= 0 || height is null or <= 0)
+        {
+            throw new InvalidOperationException("The preview-helper command requires positive --width and --height values.");
+        }
+
+        return new PreviewHelperOptions(input, width.Value, height.Value);
+    }
+
+    private static async Task WritePreviewFrameAsync(Stream output, byte[] frame)
+    {
+        var header = new byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(header, frame.Length);
+        await output.WriteAsync(header);
+        await output.WriteAsync(frame);
+        await output.FlushAsync();
+    }
+
+    private static async Task WritePreviewErrorAsync(Stream output, string message)
+    {
+        var header = new byte[4];
+        var errorBytes = Encoding.UTF8.GetBytes(message);
+        BinaryPrimitives.WriteInt32LittleEndian(header, PreviewFrameHelperProtocol.ErrorStatus);
+        await output.WriteAsync(header);
+        BinaryPrimitives.WriteInt32LittleEndian(header, errorBytes.Length);
+        await output.WriteAsync(header);
+        await output.WriteAsync(errorBytes);
+        await output.FlushAsync();
+    }
+
     private static (string Name, string? Value) SplitOption(string token)
     {
         var separatorIndex = token.IndexOf('=');
@@ -348,4 +475,6 @@ internal static class Cli
     private sealed record FormatsOptions(string FfmpegPath, string Device);
 
     private sealed record PlayOptions(PlayRequest Request, bool DryRun);
+
+    private sealed record PreviewHelperOptions(string InputPath, int Width, int Height);
 }

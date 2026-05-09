@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Globalization;
+
 namespace ffmpegplayer;
 
 internal sealed class MainForm : Form
@@ -6,6 +9,9 @@ internal sealed class MainForm : Form
     private const string DefaultMediaRootPath = @"C:\casparcg\_media";
     private const string DefaultDeckLinkDeviceName = "DeckLink SDI 4K";
     private const string DefaultDeckLinkModeCode = "Hi50";
+    // In-process FFmpeg decoding can crash the whole GUI with native access violations.
+    // Keep the implementation available for an isolated helper process later, but do not call it here.
+    private const bool EnableInProcessNativeSeekPreview = false;
 
     private readonly FfmpegDeckLink _deckLink = new();
     private readonly DeckLinkSdkPlayer _sdkPlayer = new();
@@ -22,9 +28,9 @@ internal sealed class MainForm : Form
     private readonly ComboBox _duplexBox = new();
     private readonly ComboBox _linkBox = new();
     private readonly ComboBox _levelABox = new();
-    private readonly CheckBox _loopBox = new();
     private readonly Button _startButton = new();
     private readonly Button _stopButton = new();
+    private readonly Button _pauseResumeButton = new();
     private readonly Button _dryRunButton = new();
     private readonly Button _testPatternButton = new();
     private readonly Button _playSelectedMediaButton = new();
@@ -32,15 +38,66 @@ internal sealed class MainForm : Form
     private readonly Button _clearMediaSearchButton = new();
     private readonly Button _refreshDevicesButton = new();
     private readonly Button _refreshModesButton = new();
+    private readonly Button _seekBackOneSecondButton = new();
+    private readonly Button _seekBackFiveFramesButton = new();
+    private readonly Button _seekBackOneFrameButton = new();
+    private readonly Button _seekForwardOneFrameButton = new();
+    private readonly Button _seekForwardFiveFramesButton = new();
+    private readonly Button _seekForwardOneSecondButton = new();
     private readonly TextBox _logBox = new();
     private readonly Label _statusLabel = new();
+    private readonly Label _durationLabel = new();
+    private readonly Label _positionStartLabel = new();
+    private readonly Label _positionEndLabel = new();
+    private readonly TrackBar _positionBar = new();
     private readonly System.Windows.Forms.Timer _mediaSearchTimer = new() { Interval = 350 };
+    private readonly System.Windows.Forms.Timer _durationProbeTimer = new() { Interval = 350 };
+    private readonly System.Windows.Forms.Timer _playbackPositionTimer = new() { Interval = 500 };
+    private readonly System.Windows.Forms.Timer _scrubSeekTimer = new() { Interval = 140 };
 
     private CancellationTokenSource? _playbackCancellation;
     private CancellationTokenSource? _mediaSearchCancellation;
+    private CancellationTokenSource? _durationProbeCancellation;
+    private PlaybackPauseController? _playbackPauseController;
     private TaskCompletionSource? _playbackStoppedSignal;
+    private NativeFfmpegFrameDecoder? _nativeSeekDecoder;
+    private NativeDeckLinkPreviewOutput? _nativeSeekOutput;
+    private NativeDeckLinkPreviewOutput? _scrubPreviewOutput;
+    private PreviewFrameHelperClient? _scrubPreviewHelper;
+    private CancellationTokenSource? _scrubPreviewDecodeCancellation;
+    private Task? _scrubPreviewStartTask;
+    private TimeSpan? _selectedMediaDuration;
+    private TimeSpan? _playbackDuration;
+    private DateTime? _playbackStartedAt;
+    private DateTime? _playbackPausedAt;
+    private TimeSpan _playbackPausedDuration;
+    private TimeSpan _selectedStartOffset;
+    private TimeSpan _playbackStartOffset;
+    private TimeSpan? _pendingSeekOffset;
+    private string? _selectedDurationPath;
+    private string? _playbackPath;
+    private string? _nativeSeekPath;
+    private string? _nativeSeekModeCode;
+    private string? _nativeSeekDisabledPath;
+    private string? _scrubPreviewPath;
+    private string? _scrubPreviewModeCode;
+    private string? _scrubPreviewHelperDisabledPath;
+    private TimeSpan? _pendingScrubPreviewOffset;
     private bool _isPlaying;
+    private bool _isPaused;
+    private bool _nativeSeekPreviewMode;
+    private bool _scrubPreviewMode;
+    private bool _scrubPreviewLoopRunning;
+    private bool _scrubPreviewReturnPaused;
     private bool _switchingPlayback;
+    private bool _isDraggingSeek;
+    private bool _seekQueueRunning;
+    private bool _pendingSeekShouldRemainPaused;
+    private bool _activeSeekShouldRemainPaused;
+    private bool _selectedDurationUnavailable;
+    private bool _playbackDurationUnavailable;
+    private bool _playbackIsStillImage;
+    private bool _playbackIsTestPattern;
 
     public MainForm()
     {
@@ -61,13 +118,21 @@ internal sealed class MainForm : Form
         _duplexBox.SelectedItem = "unset";
         _linkBox.SelectedItem = "single";
         _levelABox.SelectedItem = "true";
-        _loopBox.Checked = true;
+        _durationProbeTimer.Tick += DurationProbeTimer_Tick;
+        _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
+        _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
+        ScheduleDurationProbe();
 
         Shown += async (_, _) => await RefreshDevicesAsync();
         FormClosing += (_, _) =>
         {
             _playbackCancellation?.Cancel();
             _mediaSearchCancellation?.Cancel();
+            _durationProbeCancellation?.Cancel();
+            _scrubSeekTimer.Stop();
+            ExitNativeSeekPreviewMode(setStopped: false);
+            ExitScrubPreviewMode(holdForReplacement: false, setStopped: false);
+            DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
         };
     }
 
@@ -141,24 +206,23 @@ internal sealed class MainForm : Form
         var panel = BuildSection("Source");
 
         _inputPathBox.PlaceholderText = "Media file to play";
+        _inputPathBox.TextChanged += (_, _) => ScheduleDurationProbe();
 
         var content = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             BackColor = panel.BackColor,
         };
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         content.Controls.Add(BuildInputRow("Media", _inputPathBox, null), 0, 0);
-
-        _loopBox.Text = "Loop";
-        StyleCheckBox(_loopBox);
 
         _playSelectedMediaButton.Text = "Play Selected";
         _playSelectedMediaButton.Width = 120;
@@ -172,9 +236,10 @@ internal sealed class MainForm : Form
             FlowDirection = FlowDirection.LeftToRight,
             Padding = new Padding(112, 4, 0, 0),
         };
-        checkPanel.Controls.Add(_loopBox);
         checkPanel.Controls.Add(_playSelectedMediaButton);
         content.Controls.Add(checkPanel, 0, 1);
+
+        content.Controls.Add(BuildPositionRow(), 0, 2);
 
         _mediaSearchBox.PlaceholderText = "Search media";
         _mediaSearchBox.TextChanged += (_, _) => ScheduleMediaSearch();
@@ -188,7 +253,7 @@ internal sealed class MainForm : Form
             _mediaSearchTimer.Stop();
             LoadMediaTree();
         };
-        content.Controls.Add(BuildInputRow("Search", _mediaSearchBox, _clearMediaSearchButton), 0, 2);
+        content.Controls.Add(BuildInputRow("Search", _mediaSearchBox, _clearMediaSearchButton), 0, 3);
 
         _refreshMediaButton.Text = "Refresh";
         StyleButton(_refreshMediaButton, Color.FromArgb(52, 67, 82));
@@ -208,10 +273,10 @@ internal sealed class MainForm : Form
             Text = DefaultMediaRootPath,
             ReadOnly = true,
         };
-        content.Controls.Add(BuildInputRow("Library", rootPathBox, _refreshMediaButton), 0, 3);
+        content.Controls.Add(BuildInputRow("Library", rootPathBox, _refreshMediaButton), 0, 4);
 
         StyleMediaTree();
-        content.Controls.Add(_mediaTree, 0, 4);
+        content.Controls.Add(_mediaTree, 0, 5);
         panel.Controls.Add(content);
 
         return panel;
@@ -296,6 +361,102 @@ internal sealed class MainForm : Form
         return panel;
     }
 
+    private Control BuildPositionRow()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 3,
+            Padding = new Padding(112, 0, 0, 0),
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        _durationLabel.AutoSize = true;
+        _durationLabel.Dock = DockStyle.Fill;
+        _durationLabel.ForeColor = Color.FromArgb(216, 224, 229);
+        _durationLabel.Font = new Font("Segoe UI Semibold", 9.5F, FontStyle.Bold, GraphicsUnit.Point);
+        _durationLabel.Text = "Duration: -- | Remaining: --";
+        panel.Controls.Add(_durationLabel, 0, 0);
+        panel.SetColumnSpan(_durationLabel, 3);
+
+        _positionStartLabel.Text = "0";
+        _positionStartLabel.AutoSize = false;
+        _positionStartLabel.Dock = DockStyle.Fill;
+        _positionStartLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _positionStartLabel.ForeColor = Color.FromArgb(172, 184, 192);
+
+        _positionEndLabel.Text = "--";
+        _positionEndLabel.AutoSize = false;
+        _positionEndLabel.Dock = DockStyle.Fill;
+        _positionEndLabel.TextAlign = ContentAlignment.MiddleRight;
+        _positionEndLabel.ForeColor = Color.FromArgb(172, 184, 192);
+
+        _positionBar.Dock = DockStyle.Fill;
+        _positionBar.Minimum = 0;
+        _positionBar.Maximum = 1;
+        _positionBar.Value = 0;
+        _positionBar.TickStyle = TickStyle.None;
+        _positionBar.Enabled = false;
+        _positionBar.MouseDown += PositionBar_MouseDown;
+        _positionBar.MouseUp += PositionBar_MouseUp;
+        _positionBar.Scroll += (_, _) =>
+        {
+            PreviewSeekBarPosition();
+            if (_isDraggingSeek && _scrubPreviewMode)
+            {
+                ScheduleScrubSeek();
+            }
+        };
+        _positionBar.KeyUp += PositionBar_KeyUp;
+
+        panel.Controls.Add(_positionStartLabel, 0, 1);
+        panel.Controls.Add(_positionBar, 1, 1);
+        panel.Controls.Add(_positionEndLabel, 2, 1);
+
+        var stepPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            Padding = new Padding(0, 2, 0, 0),
+            Margin = new Padding(0),
+        };
+
+        ConfigureSeekStepButton(_seekBackOneSecondButton, "-1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(-1)));
+        ConfigureSeekStepButton(_seekBackFiveFramesButton, "-5 fr", () => SeekRelativeFramesAsync(-5));
+        ConfigureSeekStepButton(_seekBackOneFrameButton, "-1 fr", () => SeekRelativeFramesAsync(-1));
+        ConfigureSeekStepButton(_seekForwardOneFrameButton, "+1 fr", () => SeekRelativeFramesAsync(1));
+        ConfigureSeekStepButton(_seekForwardFiveFramesButton, "+5 fr", () => SeekRelativeFramesAsync(5));
+        ConfigureSeekStepButton(_seekForwardOneSecondButton, "+1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(1)));
+
+        stepPanel.Controls.Add(_seekBackOneSecondButton);
+        stepPanel.Controls.Add(_seekBackFiveFramesButton);
+        stepPanel.Controls.Add(_seekBackOneFrameButton);
+        stepPanel.Controls.Add(_seekForwardOneFrameButton);
+        stepPanel.Controls.Add(_seekForwardFiveFramesButton);
+        stepPanel.Controls.Add(_seekForwardOneSecondButton);
+
+        panel.Controls.Add(stepPanel, 0, 2);
+        panel.SetColumnSpan(stepPanel, 3);
+        return panel;
+    }
+
+    private void ConfigureSeekStepButton(Button button, string text, Func<Task> action)
+    {
+        button.Text = text;
+        button.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(button, Color.FromArgb(52, 67, 82));
+        button.Width = 64;
+        button.Height = 26;
+        button.Enabled = false;
+        button.Click += async (_, _) => await RunSeekSafelyAsync(action);
+    }
+
     private Control BuildActionBar()
     {
         var panel = new FlowLayoutPanel
@@ -317,6 +478,12 @@ internal sealed class MainForm : Form
         _stopButton.Enabled = false;
         _stopButton.Click += (_, _) => StopPlayback();
 
+        _pauseResumeButton.Text = "Pause";
+        StyleButton(_pauseResumeButton, Color.FromArgb(183, 126, 46));
+        _pauseResumeButton.Width = 110;
+        _pauseResumeButton.Enabled = false;
+        _pauseResumeButton.Click += async (_, _) => await TogglePauseResumePlaybackAsync();
+
         _dryRunButton.Text = "Dry Run";
         StyleButton(_dryRunButton, Color.FromArgb(52, 67, 82));
         _dryRunButton.Width = 110;
@@ -333,6 +500,7 @@ internal sealed class MainForm : Form
 
         panel.Controls.Add(_startButton);
         panel.Controls.Add(_stopButton);
+        panel.Controls.Add(_pauseResumeButton);
         panel.Controls.Add(_dryRunButton);
         panel.Controls.Add(_testPatternButton);
         panel.Controls.Add(clearLogButton);
@@ -684,9 +852,1244 @@ internal sealed class MainForm : Form
             return false;
         }
 
+        if (!string.Equals(_inputPathBox.Text.Trim(), path, StringComparison.OrdinalIgnoreCase))
+        {
+            _selectedStartOffset = TimeSpan.Zero;
+            _nativeSeekDisabledPath = null;
+            _scrubPreviewHelperDisabledPath = null;
+        }
+
         _inputPathBox.Text = path;
         SetStatus(_isPlaying ? $"Next: {Path.GetFileName(path)}" : $"Selected {Path.GetFileName(path)}", Color.FromArgb(130, 210, 164));
         return true;
+    }
+
+    private void ScheduleDurationProbe()
+    {
+        _durationProbeTimer.Stop();
+        _durationProbeTimer.Start();
+        UpdateDurationLabel();
+    }
+
+    private async void DurationProbeTimer_Tick(object? sender, EventArgs e)
+    {
+        _durationProbeTimer.Stop();
+        await RefreshSelectedDurationAsync(_inputPathBox.Text.Trim());
+    }
+
+    private async Task RefreshSelectedDurationAsync(string path)
+    {
+        _durationProbeCancellation?.Cancel();
+
+        if (!string.Equals(_selectedDurationPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            _selectedDurationPath = path;
+            _selectedMediaDuration = null;
+            _selectedDurationUnavailable = false;
+            _selectedStartOffset = TimeSpan.Zero;
+            _nativeSeekDisabledPath = null;
+            _scrubPreviewHelperDisabledPath = null;
+        }
+
+        UpdateDurationLabel();
+
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || IsImageFile(path))
+        {
+            _selectedDurationUnavailable = false;
+            UpdateDurationLabel();
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        _durationProbeCancellation = cancellation;
+
+        try
+        {
+            var duration = await ProbeMediaDurationAsync(path, cancellation.Token);
+            if (cancellation.IsCancellationRequested ||
+                !string.Equals(_inputPathBox.Text.Trim(), path, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            _selectedDurationPath = path;
+            _selectedMediaDuration = duration;
+            _selectedDurationUnavailable = duration is null;
+
+            if (string.Equals(_playbackPath, path, StringComparison.OrdinalIgnoreCase))
+            {
+                _playbackDuration = duration;
+                _playbackDurationUnavailable = duration is null;
+            }
+
+            UpdateDurationLabel();
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when the user selects another file quickly.
+        }
+        catch (Exception ex)
+        {
+            if (string.Equals(_inputPathBox.Text.Trim(), path, StringComparison.OrdinalIgnoreCase))
+            {
+                _selectedDurationPath = path;
+                _selectedMediaDuration = null;
+                _selectedDurationUnavailable = true;
+                AppendLog($"Duration unavailable: {ex.Message}");
+                UpdateDurationLabel();
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_durationProbeCancellation, cancellation))
+            {
+                _durationProbeCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private async Task<TimeSpan?> ProbeMediaDurationAsync(string path, CancellationToken cancellationToken)
+    {
+        var ffprobePath = GetFfprobePath();
+        if (!File.Exists(ffprobePath))
+        {
+            throw new InvalidOperationException($"ffprobe.exe not found next to {Path.GetFileName(GetFfmpegPath())}.");
+        }
+
+        var result = await _deckLink.RunProcessAsync(
+            ffprobePath,
+            [
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            cancellationToken: cancellationToken);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var text = result.StandardOutput.Trim();
+        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) &&
+            seconds > 0 &&
+            !double.IsNaN(seconds) &&
+            !double.IsInfinity(seconds))
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        if (result.ExitCode != 0 && !string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            throw new InvalidOperationException(result.StandardError.Trim());
+        }
+
+        return null;
+    }
+
+    private void StartPlaybackClock(PlayRequest request, bool startPaused)
+    {
+        _playbackStartedAt = DateTime.UtcNow;
+        _playbackPausedDuration = TimeSpan.Zero;
+        _playbackStartOffset = TimeSpan.Zero;
+        _playbackPath = request.UseTestPattern ? null : request.InputPath;
+        _playbackIsStillImage = !request.UseTestPattern && IsImageFile(request.InputPath);
+        _playbackIsTestPattern = request.UseTestPattern;
+        _playbackDuration = null;
+        _playbackDurationUnavailable = false;
+
+        if (_playbackPath is not null &&
+            string.Equals(_selectedDurationPath, _playbackPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _playbackDuration = _selectedMediaDuration;
+            _playbackDurationUnavailable = _selectedDurationUnavailable;
+        }
+
+        _playbackStartOffset = ClampSeekOffset(request.StartOffset, _playbackDuration);
+        if (_playbackPath is not null)
+        {
+            _selectedStartOffset = _playbackStartOffset;
+        }
+
+        _isPaused = startPaused;
+        _playbackPausedAt = startPaused ? DateTime.UtcNow : null;
+        _pauseResumeButton.Text = startPaused ? "Resume" : "Pause";
+        if (startPaused)
+        {
+            _playbackPositionTimer.Stop();
+        }
+        else
+        {
+            _playbackPositionTimer.Start();
+        }
+
+        UpdateDurationLabel();
+    }
+
+    private void StopPlaybackClock()
+    {
+        _playbackPositionTimer.Stop();
+        _playbackPauseController?.Resume();
+        _playbackPauseController = null;
+        _isPaused = false;
+        _pauseResumeButton.Text = "Pause";
+        _playbackStartedAt = null;
+        _playbackPausedAt = null;
+        _playbackPausedDuration = TimeSpan.Zero;
+        _playbackStartOffset = TimeSpan.Zero;
+        _playbackPath = null;
+        _playbackDuration = null;
+        _playbackDurationUnavailable = false;
+        _playbackIsStillImage = false;
+        _playbackIsTestPattern = false;
+    }
+
+    private void UpdateDurationLabel()
+    {
+        if (_isPlaying && _playbackStartedAt.HasValue)
+        {
+            UpdatePlaybackDurationLabel();
+            return;
+        }
+
+        var path = _inputPathBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            _durationLabel.Text = "Duration: -- | Remaining: --";
+            ResetPositionBar();
+            return;
+        }
+
+        if (IsImageFile(path))
+        {
+            _durationLabel.Text = "Still image | Remaining: live";
+            ResetPositionBar("live");
+            return;
+        }
+
+        if (string.Equals(_selectedDurationPath, path, StringComparison.OrdinalIgnoreCase) &&
+            _selectedMediaDuration.HasValue)
+        {
+            var duration = _selectedMediaDuration.Value;
+            _selectedStartOffset = ClampSeekOffset(_selectedStartOffset, duration);
+            var remaining = duration - _selectedStartOffset;
+            if (remaining < TimeSpan.Zero)
+            {
+                remaining = TimeSpan.Zero;
+            }
+
+            _durationLabel.Text = _selectedStartOffset > TimeSpan.Zero
+                ? $"Start: {FormatClock(_selectedStartOffset)} / {FormatClock(duration, roundUp: true)} | Remaining: {FormatClock(remaining, roundUp: true)}"
+                : $"Duration: {FormatClock(duration, roundUp: true)} | Remaining: --";
+            UpdatePositionBar(duration, _selectedStartOffset);
+            return;
+        }
+
+        _durationLabel.Text = _selectedDurationUnavailable &&
+            string.Equals(_selectedDurationPath, path, StringComparison.OrdinalIgnoreCase)
+                ? "Duration: unavailable | Remaining: --"
+                : "Duration: reading... | Remaining: --";
+        ResetPositionBar();
+    }
+
+    private void UpdatePlaybackDurationLabel()
+    {
+        var clockNow = _playbackPausedAt ?? DateTime.UtcNow;
+        var elapsedSinceDecoderStart = clockNow - _playbackStartedAt!.Value - _playbackPausedDuration;
+        if (elapsedSinceDecoderStart < TimeSpan.Zero)
+        {
+            elapsedSinceDecoderStart = TimeSpan.Zero;
+        }
+
+        if (_playbackIsTestPattern)
+        {
+            _durationLabel.Text = $"Test signal: {FormatClock(elapsedSinceDecoderStart)} | Remaining: live";
+            ResetPositionBar("live");
+            return;
+        }
+
+        if (_playbackIsStillImage)
+        {
+            _durationLabel.Text = $"Still image: {FormatClock(elapsedSinceDecoderStart)} | Remaining: live";
+            ResetPositionBar("live");
+            return;
+        }
+
+        if (!_playbackDuration.HasValue)
+        {
+            var elapsed = _playbackStartOffset + elapsedSinceDecoderStart;
+            _durationLabel.Text = _playbackDurationUnavailable
+                ? $"Playing: {FormatClock(elapsed)} | Duration: unavailable"
+                : $"Playing: {FormatClock(elapsed)} | Duration: reading...";
+            ResetPositionBar();
+            return;
+        }
+
+        var duration = _playbackDuration.Value;
+        var position = _playbackStartOffset + elapsedSinceDecoderStart;
+        position = position > duration
+            ? duration
+            : position;
+        if (position > duration)
+        {
+            position = duration;
+        }
+
+        var remaining = duration - position;
+        if (remaining < TimeSpan.Zero)
+        {
+            remaining = TimeSpan.Zero;
+        }
+
+        _durationLabel.Text = $"File: {FormatClock(position)} / {FormatClock(duration, roundUp: true)} | Remaining: {FormatClock(remaining, roundUp: true)}";
+        UpdatePositionBar(duration, position);
+    }
+
+    private async void PositionBar_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (!_positionBar.Enabled)
+        {
+            return;
+        }
+
+        _isDraggingSeek = true;
+        SetPositionBarValueFromMouse(e.X);
+        PreviewSeekBarPosition();
+        if (CanUseScrubPreview())
+        {
+            _scrubPreviewStartTask = BeginScrubPreviewAsync(GetPositionBarTime());
+            await RunSeekSafelyAsync(() => _scrubPreviewStartTask ?? Task.CompletedTask);
+            _scrubPreviewStartTask = null;
+        }
+    }
+
+    private async void PositionBar_MouseUp(object? sender, MouseEventArgs e)
+    {
+        if (!_positionBar.Enabled)
+        {
+            _isDraggingSeek = false;
+            return;
+        }
+
+        SetPositionBarValueFromMouse(e.X);
+        _isDraggingSeek = false;
+        _scrubSeekTimer.Stop();
+        if (_scrubPreviewStartTask is not null)
+        {
+            await RunSeekSafelyAsync(() => _scrubPreviewStartTask ?? Task.CompletedTask);
+            _scrubPreviewStartTask = null;
+        }
+
+        if (_scrubPreviewMode)
+        {
+            await RunSeekSafelyAsync(() => FinishScrubPreviewAsync(GetPositionBarTime()));
+            return;
+        }
+
+        await RunSeekSafelyAsync(SeekToPositionBarValueAsync);
+    }
+
+    private async void PositionBar_KeyUp(object? sender, KeyEventArgs e)
+    {
+        if (!_positionBar.Enabled)
+        {
+            return;
+        }
+
+        if (e.KeyCode is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageUp or Keys.PageDown)
+        {
+            await RunSeekSafelyAsync(SeekToPositionBarValueAsync);
+        }
+    }
+
+    private void ScheduleScrubSeek()
+    {
+        if (!_scrubPreviewMode)
+        {
+            return;
+        }
+
+        _scrubSeekTimer.Stop();
+        _scrubSeekTimer.Start();
+    }
+
+    private async void ScrubSeekTimer_Tick(object? sender, EventArgs e)
+    {
+        _scrubSeekTimer.Stop();
+        if (_scrubPreviewMode)
+        {
+            await RunSeekSafelyAsync(() => QueueScrubPreviewFrameAsync(GetPositionBarTime()));
+        }
+    }
+
+    private bool CanUseScrubPreview()
+    {
+        var path = _inputPathBox.Text.Trim();
+        return _isPlaying &&
+            !_nativeSeekPreviewMode &&
+            !_scrubPreviewMode &&
+            !_playbackIsStillImage &&
+            !_playbackIsTestPattern &&
+            File.Exists(path) &&
+            !IsImageFile(path);
+    }
+
+    private async Task BeginScrubPreviewAsync(TimeSpan target)
+    {
+        var duration = GetCurrentSeekDuration();
+        if (!duration.HasValue)
+        {
+            return;
+        }
+
+        target = ClampSeekOffset(target, duration.Value);
+        _selectedStartOffset = target;
+        UpdatePositionBar(duration.Value, target);
+
+        if (!_scrubPreviewMode)
+        {
+            _scrubPreviewReturnPaused = _isPaused;
+            AppendLog("Starting NLE-style scrub preview...");
+            SetStatus("Starting scrub preview", Color.FromArgb(126, 188, 226));
+
+            var stoppedTask = _playbackStoppedSignal?.Task;
+            PreserveVideoOutputForReplacement();
+            StopPlayback();
+            if (stoppedTask is not null)
+            {
+                await stoppedTask;
+            }
+
+            _scrubPreviewMode = true;
+            _isPaused = true;
+            SetPlaying(true);
+            _pauseResumeButton.Text = "Resume";
+            SetStatus("Scrub preview", Color.FromArgb(232, 181, 105));
+        }
+
+        await QueueScrubPreviewFrameAsync(target);
+    }
+
+    private async Task FinishScrubPreviewAsync(TimeSpan target)
+    {
+        var duration = GetCurrentSeekDuration();
+        if (duration.HasValue)
+        {
+            target = ClampSeekOffset(target, duration.Value);
+        }
+
+        _selectedStartOffset = target;
+        _pendingScrubPreviewOffset = null;
+        _scrubPreviewDecodeCancellation?.Cancel();
+
+        var shouldRemainPaused = _scrubPreviewReturnPaused;
+        AppendLog(shouldRemainPaused
+            ? $"Leaving scrub preview paused at {FormatClock(target)}..."
+            : $"Leaving scrub preview and playing from {FormatClock(target)}...");
+
+        ExitScrubPreviewMode(holdForReplacement: true, setStopped: true);
+        await StartPlaybackAsync(dryRun: false, startOffset: target, startPaused: shouldRemainPaused);
+    }
+
+    private async Task QueueScrubPreviewFrameAsync(TimeSpan target)
+    {
+        if (!_scrubPreviewMode)
+        {
+            return;
+        }
+
+        var duration = GetCurrentSeekDuration();
+        if (duration.HasValue)
+        {
+            target = ClampSeekOffset(target, duration.Value);
+            _selectedStartOffset = target;
+            UpdatePositionBar(duration.Value, target);
+        }
+
+        _pendingScrubPreviewOffset = target;
+        if (_scrubPreviewLoopRunning)
+        {
+            _scrubPreviewDecodeCancellation?.Cancel();
+            return;
+        }
+
+        _scrubPreviewLoopRunning = true;
+        try
+        {
+            while (_scrubPreviewMode && _pendingScrubPreviewOffset.HasValue)
+            {
+                var nextTarget = _pendingScrubPreviewOffset.Value;
+                _pendingScrubPreviewOffset = null;
+                await DisplayScrubPreviewFrameAsync(nextTarget);
+            }
+        }
+        finally
+        {
+            _scrubPreviewLoopRunning = false;
+        }
+    }
+
+    private async Task DisplayScrubPreviewFrameAsync(TimeSpan target)
+    {
+        var request = BuildRequest(false, target);
+        var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
+        request = _deckLink.ApplyModeDefaults(request, selectedMode);
+        var size = ParseVideoSize(request.VideoSize)
+            ?? throw new InvalidOperationException("Choose a valid DeckLink output size before scrubbing.");
+
+        EnsureScrubPreviewOutput(request);
+        UpdateScrubPreviewClock(request, target);
+
+        var decodeTimedOut = false;
+        using var decodeCancellation = new CancellationTokenSource();
+        using var timeoutTimer = new System.Threading.Timer(
+            _ =>
+            {
+                decodeTimedOut = true;
+                decodeCancellation.Cancel();
+            },
+            null,
+            TimeSpan.FromSeconds(2),
+            Timeout.InfiniteTimeSpan);
+        var previousCancellation = _scrubPreviewDecodeCancellation;
+        _scrubPreviewDecodeCancellation = decodeCancellation;
+        previousCancellation?.Cancel();
+
+        try
+        {
+            var frame = await DecodeScrubPreviewFrameAsync(request, size.Width, size.Height, target, decodeCancellation.Token);
+            if (!decodeCancellation.IsCancellationRequested && _scrubPreviewMode)
+            {
+                DisplayDecodedScrubPreviewFrame(frame, target);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (decodeTimedOut && _scrubPreviewMode)
+            {
+                _scrubPreviewHelperDisabledPath = request.InputPath;
+                DisposeScrubPreviewHelper();
+                AppendLog("Persistent preview helper timed out; using one-shot ffmpeg preview for this file.");
+                try
+                {
+                    using var fallbackCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    var fallbackFrame = await DecodeScrubPreviewFrameWithFfmpegAsync(
+                        request,
+                        size.Width,
+                        size.Height,
+                        fallbackCancellation.Token);
+                    DisplayDecodedScrubPreviewFrame(fallbackFrame, target);
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"Fallback scrub preview frame unavailable: {ex.Message}");
+                }
+            }
+
+            // Expected when the user keeps dragging and a newer frame is requested.
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Scrub preview frame unavailable: {ex.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(_scrubPreviewDecodeCancellation, decodeCancellation))
+            {
+                _scrubPreviewDecodeCancellation = null;
+            }
+        }
+    }
+
+    private void DisplayDecodedScrubPreviewFrame(byte[] frame, TimeSpan target)
+    {
+        if (!_scrubPreviewMode)
+        {
+            return;
+        }
+
+        _scrubPreviewOutput!.DisplayFrame(frame);
+        SetStatus($"Scrub {FormatClock(target)}", Color.FromArgb(232, 181, 105));
+        UpdateDurationLabel();
+    }
+
+    private void EnsureScrubPreviewOutput(PlayRequest request)
+    {
+        var modeCode = request.FormatCode ?? string.Empty;
+        if (_scrubPreviewOutput is not null &&
+            string.Equals(_scrubPreviewPath, request.InputPath, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(_scrubPreviewModeCode, modeCode, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _scrubPreviewOutput?.Dispose();
+        _scrubPreviewOutput = new NativeDeckLinkPreviewOutput(request);
+        _scrubPreviewPath = request.InputPath;
+        _scrubPreviewModeCode = modeCode;
+    }
+
+    private void UpdateScrubPreviewClock(PlayRequest request, TimeSpan target)
+    {
+        _selectedStartOffset = target;
+        _playbackStartOffset = target;
+        _playbackDuration = _selectedMediaDuration;
+        _playbackStartedAt = DateTime.UtcNow;
+        _playbackPausedAt = _playbackStartedAt;
+        _playbackPausedDuration = TimeSpan.Zero;
+        _playbackPath = request.InputPath;
+        _playbackIsStillImage = false;
+        _playbackIsTestPattern = false;
+        _isPaused = true;
+    }
+
+    private async Task<byte[]> DecodeScrubPreviewFrameAsync(
+        PlayRequest request,
+        int width,
+        int height,
+        TimeSpan target,
+        CancellationToken cancellationToken)
+    {
+        if (NativeFfmpegFrameDecoder.IsAvailable() &&
+            !string.Equals(_scrubPreviewHelperDisabledPath, request.InputPath, StringComparison.OrdinalIgnoreCase))
+        {
+            EnsureScrubPreviewHelper(request, width, height);
+            try
+            {
+                return await _scrubPreviewHelper!.DecodeFrameAsync(target, cancellationToken);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                _scrubPreviewHelperDisabledPath = request.InputPath;
+                DisposeScrubPreviewHelper();
+                AppendLog($"Persistent preview helper disabled for this file: {ex.Message}");
+            }
+        }
+
+        return await DecodeScrubPreviewFrameWithFfmpegAsync(request, width, height, cancellationToken);
+    }
+
+    private void EnsureScrubPreviewHelper(PlayRequest request, int width, int height)
+    {
+        if (_scrubPreviewHelper is not null &&
+            _scrubPreviewHelper.Matches(request.InputPath, width, height))
+        {
+            return;
+        }
+
+        DisposeScrubPreviewHelper();
+        _scrubPreviewHelper = new PreviewFrameHelperClient(request.InputPath, width, height, AppendLog);
+    }
+
+    private void DisposeScrubPreviewHelper()
+    {
+        _scrubPreviewHelper?.Dispose();
+        _scrubPreviewHelper = null;
+    }
+
+    private async Task<byte[]> DecodeScrubPreviewFrameWithFfmpegAsync(
+        PlayRequest request,
+        int width,
+        int height,
+        CancellationToken cancellationToken)
+    {
+        var frameBytes = checked(width * height * 2);
+        var buffer = new byte[frameBytes];
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = request.FfmpegPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            },
+        };
+
+        foreach (var argument in BuildScrubPreviewArguments(request, width, height))
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+
+        process.Start();
+        using var cancellationRegistration = cancellationToken.Register(() => TryKillProcess(process));
+        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+
+        var offset = 0;
+        while (offset < buffer.Length)
+        {
+            var read = await process.StandardOutput.BaseStream.ReadAsync(
+                buffer.AsMemory(offset, buffer.Length - offset),
+                cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            offset += read;
+        }
+
+        await process.WaitForExitAsync(cancellationToken);
+        var stderr = await stderrTask;
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr)
+                ? $"ffmpeg preview exited with code {process.ExitCode}."
+                : stderr.Trim());
+        }
+
+        if (offset < frameBytes)
+        {
+            throw new InvalidOperationException($"ffmpeg preview returned {offset} of {frameBytes} bytes.");
+        }
+
+        return buffer;
+    }
+
+    private static IReadOnlyList<string> BuildScrubPreviewArguments(PlayRequest request, int width, int height)
+    {
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-loglevel",
+            "error",
+        };
+
+        if (request.StartOffset > TimeSpan.Zero)
+        {
+            args.Add("-ss");
+            args.Add(FfmpegDeckLink.FormatFfmpegTimestamp(request.StartOffset));
+            args.Add("-noaccurate_seek");
+        }
+
+        args.Add("-i");
+        args.Add(request.InputPath);
+        args.Add("-map");
+        args.Add("0:v:0");
+        args.Add("-an");
+        args.Add("-vf");
+        args.Add("format=uyvy422");
+        args.Add("-frames:v");
+        args.Add("1");
+        args.Add("-s");
+        args.Add($"{width}x{height}");
+        args.Add("-pix_fmt");
+        args.Add("uyvy422");
+        args.Add("-f");
+        args.Add("rawvideo");
+        args.Add("pipe:1");
+        return args;
+    }
+
+    private static void TryKillProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Best effort when cancelling a stale preview frame.
+        }
+    }
+
+    private void SetPositionBarValueFromMouse(int x)
+    {
+        if (_positionBar.Width <= 0)
+        {
+            return;
+        }
+
+        var ratio = Math.Clamp((double)x / _positionBar.Width, 0, 1);
+        var value = (int)Math.Round(_positionBar.Minimum + ratio * (_positionBar.Maximum - _positionBar.Minimum));
+        _positionBar.Value = Math.Clamp(value, _positionBar.Minimum, _positionBar.Maximum);
+    }
+
+    private void PreviewSeekBarPosition()
+    {
+        var duration = GetCurrentSeekDuration();
+        if (!duration.HasValue)
+        {
+            return;
+        }
+
+        var target = ClampSeekOffset(GetPositionBarTime(), duration.Value);
+        if (!_isPlaying)
+        {
+            _selectedStartOffset = target;
+        }
+
+        var remaining = duration.Value - target;
+        if (remaining < TimeSpan.Zero)
+        {
+            remaining = TimeSpan.Zero;
+        }
+
+        _durationLabel.Text = $"Seek: {FormatClock(target)} / {FormatClock(duration.Value, roundUp: true)} | Remaining: {FormatClock(remaining, roundUp: true)}";
+    }
+
+    private async Task SeekToPositionBarValueAsync()
+    {
+        await SeekToOffsetAsync(GetPositionBarTime());
+    }
+
+    private async Task SeekRelativeAsync(TimeSpan delta)
+    {
+        await SeekToOffsetAsync(GetCurrentSeekPosition() + delta);
+    }
+
+    private async Task SeekRelativeFramesAsync(int frames)
+    {
+        await SeekRelativeAsync(TimeSpan.FromTicks(GetFrameDuration().Ticks * frames));
+    }
+
+    private async Task SeekToOffsetAsync(TimeSpan target)
+    {
+        var duration = GetCurrentSeekDuration();
+        if (!duration.HasValue)
+        {
+            return;
+        }
+
+        target = ClampSeekOffset(target, duration.Value);
+        _selectedStartOffset = target;
+        UpdatePositionBar(duration.Value, target);
+
+        if (!_isPlaying && !_seekQueueRunning)
+        {
+            UpdateDurationLabel();
+            SetStatus($"Start set to {FormatClock(target)}", Color.FromArgb(130, 210, 164));
+            return;
+        }
+
+        if (_playbackIsStillImage || _playbackIsTestPattern)
+        {
+            UpdateDurationLabel();
+            return;
+        }
+
+        var path = _inputPathBox.Text.Trim();
+        if (EnableInProcessNativeSeekPreview &&
+            _isPaused &&
+            NativeFfmpegFrameDecoder.IsAvailable() &&
+            !string.Equals(_nativeSeekDisabledPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                await PreviewNativeSeekFrameAsync(target);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _nativeSeekDisabledPath = path;
+                AppendLog($"Native seek preview disabled for this file: {ex.Message}");
+                if (_nativeSeekPreviewMode)
+                {
+                    ExitNativeSeekPreviewMode(setStopped: true);
+                }
+
+                if (!_isPlaying)
+                {
+                    _ = StartPlaybackAsync(dryRun: false, startOffset: target, startPaused: true);
+                    return;
+                }
+            }
+        }
+
+        _pendingSeekOffset = target;
+        _pendingSeekShouldRemainPaused = _isPaused || (_seekQueueRunning && _activeSeekShouldRemainPaused);
+
+        if (!_seekQueueRunning)
+        {
+            await ProcessPendingSeekAsync();
+        }
+    }
+
+    private async Task RunSeekSafelyAsync(Func<Task> seekAction)
+    {
+        try
+        {
+            await seekAction();
+        }
+        catch (Exception ex)
+        {
+            _scrubSeekTimer.Stop();
+            _isDraggingSeek = false;
+            AppendLog($"Seek error: {ex.Message}");
+            SetStatus("Seek error", Color.FromArgb(229, 113, 105));
+            UpdateDurationLabel();
+        }
+    }
+
+    private async Task PreviewNativeSeekFrameAsync(TimeSpan target)
+    {
+        var request = BuildRequest(false, target);
+        var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
+        request = _deckLink.ApplyModeDefaults(request, selectedMode);
+
+        var size = ParseVideoSize(request.VideoSize)
+            ?? throw new InvalidOperationException("Choose a valid DeckLink output size before native seek.");
+
+        var stoppedTask = _playbackStoppedSignal?.Task;
+        if (!_nativeSeekPreviewMode && _isPlaying)
+        {
+            AppendLog("Entering native seek preview...");
+            StopPlayback();
+            if (stoppedTask is not null)
+            {
+                await stoppedTask;
+            }
+
+            _nativeSeekPreviewMode = true;
+            SetPlaying(true);
+            _isPaused = true;
+            _pauseResumeButton.Text = "Resume";
+            SetStatus("Paused seek preview", Color.FromArgb(232, 181, 105));
+        }
+
+        EnsureNativeSeekPreview(request, size.Width, size.Height);
+
+        _selectedStartOffset = target;
+        _playbackStartOffset = target;
+        _playbackDuration = _selectedMediaDuration;
+        _playbackStartedAt = DateTime.UtcNow;
+        _playbackPausedAt = _playbackStartedAt;
+        _playbackPausedDuration = TimeSpan.Zero;
+        _playbackPath = request.InputPath;
+        _playbackIsStillImage = false;
+        _playbackIsTestPattern = false;
+        _isPaused = true;
+
+        var frame = await Task.Run(() => _nativeSeekDecoder!.DecodeFrame(target));
+        _nativeSeekOutput!.DisplayFrame(frame);
+        SetStatus($"Preview {FormatClock(target)}", Color.FromArgb(232, 181, 105));
+        UpdateDurationLabel();
+    }
+
+    private void EnsureNativeSeekPreview(PlayRequest request, int width, int height)
+    {
+        var modeCode = request.FormatCode ?? string.Empty;
+        if (_nativeSeekDecoder is not null &&
+            _nativeSeekOutput is not null &&
+            string.Equals(_nativeSeekPath, request.InputPath, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(_nativeSeekModeCode, modeCode, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        DisposeNativeSeekPreviewObjects();
+        _nativeSeekPath = request.InputPath;
+        _nativeSeekModeCode = modeCode;
+        _nativeSeekDecoder = new NativeFfmpegFrameDecoder(request.InputPath, width, height);
+        _nativeSeekOutput = new NativeDeckLinkPreviewOutput(request);
+    }
+
+    private async Task ResumeFromNativeSeekPreviewAsync()
+    {
+        var startOffset = _selectedStartOffset;
+        AppendLog($"Resuming playout from native preview at {FormatClock(startOffset)}...");
+        ExitNativeSeekPreviewMode(setStopped: true);
+        await StartPlaybackAsync(dryRun: false, startOffset: startOffset);
+    }
+
+    private void ExitNativeSeekPreviewMode(bool setStopped)
+    {
+        _scrubSeekTimer.Stop();
+        DisposeNativeSeekPreviewObjects();
+        _nativeSeekPreviewMode = false;
+        _nativeSeekPath = null;
+        _nativeSeekModeCode = null;
+        _pendingSeekOffset = null;
+        _seekQueueRunning = false;
+        _activeSeekShouldRemainPaused = false;
+        if (setStopped)
+        {
+            StopPlaybackClock();
+            SetPlaying(false);
+            SetStatus("Stopped", Color.FromArgb(130, 210, 164));
+            UpdateDurationLabel();
+        }
+    }
+
+    private void DisposeNativeSeekPreviewObjects()
+    {
+        _nativeSeekOutput?.Dispose();
+        _nativeSeekOutput = null;
+        _nativeSeekDecoder?.Dispose();
+        _nativeSeekDecoder = null;
+    }
+
+    private void ExitScrubPreviewMode(bool holdForReplacement, bool setStopped)
+    {
+        _scrubSeekTimer.Stop();
+        _pendingScrubPreviewOffset = null;
+        _scrubPreviewDecodeCancellation?.Cancel();
+        _scrubPreviewDecodeCancellation = null;
+
+        if (holdForReplacement)
+        {
+            _scrubPreviewOutput?.HoldForReplacement();
+        }
+        else
+        {
+            _scrubPreviewOutput?.Dispose();
+        }
+
+        _scrubPreviewOutput = null;
+        _scrubPreviewStartTask = null;
+        DisposeScrubPreviewHelper();
+        _scrubPreviewPath = null;
+        _scrubPreviewModeCode = null;
+        _scrubPreviewMode = false;
+        _scrubPreviewLoopRunning = false;
+        _scrubPreviewReturnPaused = false;
+        if (setStopped)
+        {
+            StopPlaybackClock();
+            SetPlaying(false);
+            SetStatus("Stopped", Color.FromArgb(130, 210, 164));
+            UpdateDurationLabel();
+        }
+    }
+
+    private async Task ProcessPendingSeekAsync()
+    {
+        if (_seekQueueRunning)
+        {
+            return;
+        }
+
+        _seekQueueRunning = true;
+        try
+        {
+            while (_pendingSeekOffset.HasValue)
+            {
+                var target = _pendingSeekOffset.Value;
+                var shouldRemainPaused = _pendingSeekShouldRemainPaused;
+                _pendingSeekOffset = null;
+                _pendingSeekShouldRemainPaused = false;
+                _activeSeekShouldRemainPaused = shouldRemainPaused;
+
+                await PerformSeekAsync(target, shouldRemainPaused);
+            }
+        }
+        finally
+        {
+            _activeSeekShouldRemainPaused = false;
+            _seekQueueRunning = false;
+        }
+    }
+
+    private async Task PerformSeekAsync(TimeSpan target, bool shouldRemainPaused)
+    {
+        _switchingPlayback = true;
+        try
+        {
+            AppendLog($"Seeking playout to {FormatClock(target)}...");
+            SetStatus($"Seeking to {FormatClock(target)}", Color.FromArgb(126, 188, 226));
+
+            var stoppedTask = _playbackStoppedSignal?.Task;
+            PreserveVideoOutputForReplacement();
+            StopPlayback();
+            if (stoppedTask is not null)
+            {
+                await stoppedTask;
+            }
+
+            AppendLog(shouldRemainPaused
+                ? $"Starting paused playout from {FormatClock(target)}..."
+                : $"Starting playout from {FormatClock(target)}...");
+            _ = StartPlaybackAsync(dryRun: false, startOffset: target, startPaused: shouldRemainPaused);
+        }
+        finally
+        {
+            _switchingPlayback = false;
+        }
+    }
+
+    private TimeSpan? GetCurrentSeekDuration()
+    {
+        return _isPlaying
+            ? _playbackDuration
+            : _selectedMediaDuration;
+    }
+
+    private TimeSpan GetPositionBarTime()
+    {
+        return TimeSpan.FromMilliseconds(Math.Clamp(_positionBar.Value, _positionBar.Minimum, _positionBar.Maximum));
+    }
+
+    private TimeSpan GetCurrentSeekPosition()
+    {
+        if (!_isPlaying || !_playbackStartedAt.HasValue)
+        {
+            return _selectedStartOffset;
+        }
+
+        if (_nativeSeekPreviewMode)
+        {
+            return _selectedStartOffset;
+        }
+
+        if (_scrubPreviewMode)
+        {
+            return _selectedStartOffset;
+        }
+
+        var clockNow = _playbackPausedAt ?? DateTime.UtcNow;
+        var elapsedSinceDecoderStart = clockNow - _playbackStartedAt.Value - _playbackPausedDuration;
+        if (elapsedSinceDecoderStart < TimeSpan.Zero)
+        {
+            elapsedSinceDecoderStart = TimeSpan.Zero;
+        }
+
+        return ClampSeekOffset(_playbackStartOffset + elapsedSinceDecoderStart, _playbackDuration);
+    }
+
+    private TimeSpan GetFrameDuration()
+    {
+        var rate = ParseFrameRate(_frameRateBox.Text);
+        if (rate <= 0)
+        {
+            rate = 25;
+        }
+
+        return TimeSpan.FromSeconds(1 / rate);
+    }
+
+    private static double ParseFrameRate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return 0;
+        }
+
+        value = value.Trim();
+        var parts = value.Split('/');
+        if (parts.Length == 2 &&
+            double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var numerator) &&
+            double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var denominator) &&
+            denominator != 0)
+        {
+            return numerator / denominator;
+        }
+
+        return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : 0;
+    }
+
+    private static (int Width, int Height)? ParseVideoSize(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var parts = value.Split('x', 'X');
+        if (parts.Length != 2 ||
+            !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var width) ||
+            !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var height) ||
+            width <= 0 ||
+            height <= 0)
+        {
+            return null;
+        }
+
+        return (width, height);
+    }
+
+    private static TimeSpan ClampSeekOffset(TimeSpan offset, TimeSpan? duration)
+    {
+        if (offset < TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        if (duration.HasValue && duration.Value > TimeSpan.Zero && offset > duration.Value)
+        {
+            return duration.Value;
+        }
+
+        return offset;
+    }
+
+    private void ResetPositionBar(string endText = "--")
+    {
+        SetSeekControlsEnabled(false);
+        if (_positionBar.Maximum != 1)
+        {
+            _positionBar.Value = 0;
+            _positionBar.Maximum = 1;
+        }
+
+        _positionBar.Value = 0;
+        _positionStartLabel.Text = "0";
+        _positionEndLabel.Text = endText;
+    }
+
+    private void UpdatePositionBar(TimeSpan duration, TimeSpan position)
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            ResetPositionBar();
+            return;
+        }
+
+        SetSeekControlsEnabled(!_playbackIsStillImage && !_playbackIsTestPattern);
+        var max = Math.Max(1, (int)Math.Ceiling(duration.TotalMilliseconds));
+        if (_positionBar.Maximum != max)
+        {
+            _positionBar.Value = 0;
+            _positionBar.Maximum = max;
+            _positionBar.TickFrequency = Math.Max(1, max / 10);
+        }
+
+        var value = Math.Clamp((int)Math.Floor(position.TotalMilliseconds), 0, max);
+        if (!_isDraggingSeek && _positionBar.Value != value)
+        {
+            _positionBar.Value = value;
+        }
+
+        _positionStartLabel.Text = "0";
+        _positionEndLabel.Text = FormatClock(duration, roundUp: true);
+    }
+
+    private void SetSeekControlsEnabled(bool enabled)
+    {
+        _positionBar.Enabled = enabled;
+        _seekBackOneSecondButton.Enabled = enabled;
+        _seekBackFiveFramesButton.Enabled = enabled;
+        _seekBackOneFrameButton.Enabled = enabled;
+        _seekForwardOneFrameButton.Enabled = enabled;
+        _seekForwardFiveFramesButton.Enabled = enabled;
+        _seekForwardOneSecondButton.Enabled = enabled;
+    }
+
+    private static string FormatClock(TimeSpan value, bool roundUp = false)
+    {
+        if (value < TimeSpan.Zero)
+        {
+            value = TimeSpan.Zero;
+        }
+
+        var seconds = roundUp
+            ? Math.Ceiling(value.TotalSeconds)
+            : Math.Floor(value.TotalSeconds);
+        value = TimeSpan.FromSeconds(seconds);
+        if (value.TotalHours >= 1)
+        {
+            return $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
+        }
+
+        return $"{value.Minutes:00}:{value.Seconds:00}";
     }
 
     private async Task PlaySelectedMediaNodeAsync(TreeNode? node)
@@ -720,13 +2123,16 @@ internal sealed class MainForm : Form
             SetStatus($"Switching to {nextFile}", Color.FromArgb(126, 188, 226));
 
             var stoppedTask = _playbackStoppedSignal?.Task;
+            PreserveVideoOutputForReplacement();
             StopPlayback();
             if (stoppedTask is not null)
             {
                 await stoppedTask;
             }
 
-            await StartPlaybackAsync(dryRun: false);
+            nextFile = Path.GetFileName(_inputPathBox.Text);
+            AppendLog($"Starting switched playout: {nextFile}...");
+            _ = StartPlaybackAsync(dryRun: false);
         }
         finally
         {
@@ -928,7 +2334,11 @@ internal sealed class MainForm : Form
             : Color.FromArgb(130, 210, 164);
     }
 
-    private async Task StartPlaybackAsync(bool dryRun, bool useTestPattern = false)
+    private async Task StartPlaybackAsync(
+        bool dryRun,
+        bool useTestPattern = false,
+        TimeSpan? startOffset = null,
+        bool startPaused = false)
     {
         if (_isPlaying)
         {
@@ -937,7 +2347,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            var request = BuildRequest(useTestPattern);
+            var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset);
             var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
             request = _deckLink.ApplyModeDefaults(request, selectedMode);
             var commandText = _sdkPlayer.FormatDecoderCommand(request);
@@ -956,10 +2366,23 @@ internal sealed class MainForm : Form
                 return;
             }
 
+            var pauseController = new PlaybackPauseController();
+            if (startPaused)
+            {
+                pauseController.Pause();
+            }
+
             _playbackCancellation = new CancellationTokenSource();
+            _playbackPauseController = pauseController;
             _playbackStoppedSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             SetPlaying(true);
-            AppendLog("Starting playout...");
+            StartPlaybackClock(request, startPaused);
+            AppendLog(startPaused ? "Starting playout paused..." : "Starting playout...");
+            if (startPaused)
+            {
+                SetStatus("Paused", Color.FromArgb(232, 181, 105));
+            }
+
             var logPath = GetPlaybackLogPath();
             AppendLog($"Writing playback log to {logPath}");
 
@@ -981,7 +2404,12 @@ internal sealed class MainForm : Form
             LogPlaybackLine(commandText);
 
             var result = await Task.Run(
-                () => _sdkPlayer.PlayAsync(request, LogPlaybackLine, _playbackCancellation.Token),
+                () => _sdkPlayer.PlayAsync(
+                    request,
+                    LogPlaybackLine,
+                    _playbackCancellation.Token,
+                    pauseController,
+                    renderInitialFrameWhilePaused: startPaused),
                 _playbackCancellation.Token);
 
             AppendLog(result.Cancelled ? "Playback stopped." : $"DeckLink SDK engine exited with code {result.ExitCode}.");
@@ -998,20 +2426,37 @@ internal sealed class MainForm : Form
         {
             AppendLog($"Error: {ex.Message}");
             SetStatus("Error", Color.FromArgb(229, 113, 105));
+            DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
         }
         finally
         {
             var stoppedSignal = _playbackStoppedSignal;
+            StopPlaybackClock();
             SetPlaying(false);
             _playbackCancellation?.Dispose();
             _playbackCancellation = null;
             _playbackStoppedSignal = null;
             stoppedSignal?.TrySetResult();
+            UpdateDurationLabel();
         }
     }
 
     private void StopPlayback()
     {
+        if (_scrubPreviewMode)
+        {
+            AppendLog("Stopping scrub preview...");
+            ExitScrubPreviewMode(holdForReplacement: false, setStopped: true);
+            return;
+        }
+
+        if (_nativeSeekPreviewMode)
+        {
+            AppendLog("Stopping native seek preview...");
+            ExitNativeSeekPreviewMode(setStopped: true);
+            return;
+        }
+
         if (!_isPlaying)
         {
             return;
@@ -1019,9 +2464,89 @@ internal sealed class MainForm : Form
 
         AppendLog("Stopping playout...");
         _playbackCancellation?.Cancel();
+        _playbackPauseController?.Resume();
     }
 
-    private PlayRequest BuildRequest(bool useTestPattern)
+    private void PreserveVideoOutputForReplacement()
+    {
+        if (_playbackPauseController is null)
+        {
+            return;
+        }
+
+        _playbackPauseController.PreserveVideoOutputOnStop = true;
+        AppendLog("Holding last DeckLink frame until replacement playout starts...");
+    }
+
+    private async Task TogglePauseResumePlaybackAsync()
+    {
+        if (_scrubPreviewMode)
+        {
+            await FinishScrubPreviewAsync(_selectedStartOffset);
+            return;
+        }
+
+        if (_nativeSeekPreviewMode)
+        {
+            await ResumeFromNativeSeekPreviewAsync();
+            return;
+        }
+
+        if (!_isPlaying || _playbackPauseController is null)
+        {
+            return;
+        }
+
+        if (_isPaused)
+        {
+            ResumePlayback();
+        }
+        else
+        {
+            PausePlayback();
+        }
+    }
+
+    private void PausePlayback()
+    {
+        if (_playbackPauseController is null || _isPaused)
+        {
+            return;
+        }
+
+        _playbackPauseController.Pause();
+        _isPaused = true;
+        _playbackPausedAt = DateTime.UtcNow;
+        _playbackPositionTimer.Stop();
+        _pauseResumeButton.Text = "Resume";
+        AppendLog("Playback paused.");
+        SetStatus("Paused", Color.FromArgb(232, 181, 105));
+        UpdateDurationLabel();
+    }
+
+    private void ResumePlayback()
+    {
+        if (_playbackPauseController is null || !_isPaused)
+        {
+            return;
+        }
+
+        if (_playbackPausedAt.HasValue)
+        {
+            _playbackPausedDuration += DateTime.UtcNow - _playbackPausedAt.Value;
+        }
+
+        _playbackPausedAt = null;
+        _isPaused = false;
+        _playbackPauseController.Resume();
+        _playbackPositionTimer.Start();
+        _pauseResumeButton.Text = "Pause";
+        AppendLog("Playback resumed.");
+        SetStatus("Playing", Color.FromArgb(126, 188, 226));
+        UpdateDurationLabel();
+    }
+
+    private PlayRequest BuildRequest(bool useTestPattern, TimeSpan startOffset)
     {
         var inputPath = _inputPathBox.Text.Trim();
         if (!useTestPattern && string.IsNullOrWhiteSpace(inputPath))
@@ -1067,6 +2592,9 @@ internal sealed class MainForm : Form
 
         var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
         var isStillImage = IsImageFile(inputPath);
+        var normalizedStartOffset = useTestPattern || isStillImage
+            ? TimeSpan.Zero
+            : ClampSeekOffset(startOffset, _selectedMediaDuration);
 
         return new PlayRequest(
             GetFfmpegPath(),
@@ -1083,11 +2611,12 @@ internal sealed class MainForm : Form
             levelA,
             VideoFilter: null,
             AudioFilter: null,
-            _loopBox.Checked,
+            false,
             useTestPattern || isStillImage,
             selectedMode?.IsInterlaced == true,
             selectedMode?.FieldOrder,
-            useTestPattern);
+            useTestPattern,
+            normalizedStartOffset);
     }
 
     private async Task RunUiTaskAsync(string status, Func<CancellationToken, Task> task)
@@ -1114,6 +2643,14 @@ internal sealed class MainForm : Form
     private string GetFfmpegPath()
     {
         return _deckLink.FindDefaultFfmpegPath();
+    }
+
+    private string GetFfprobePath()
+    {
+        var ffmpegPath = GetFfmpegPath();
+        return Path.Combine(
+            Path.GetDirectoryName(ffmpegPath) ?? AppContext.BaseDirectory,
+            "ffprobe.exe");
     }
 
     private static string FindDefaultMediaPath()
@@ -1218,6 +2755,7 @@ internal sealed class MainForm : Form
         _startButton.Enabled = !isPlaying;
         _dryRunButton.Enabled = !isPlaying;
         _stopButton.Enabled = isPlaying;
+        _pauseResumeButton.Enabled = isPlaying;
         _refreshDevicesButton.Enabled = !isPlaying;
         _refreshModesButton.Enabled = !isPlaying;
         _testPatternButton.Enabled = !isPlaying;
@@ -1226,6 +2764,11 @@ internal sealed class MainForm : Form
         _mediaSearchBox.Enabled = true;
         _clearMediaSearchButton.Enabled = true;
         _mediaTree.Enabled = true;
+        if (!isPlaying)
+        {
+            _pauseResumeButton.Text = "Pause";
+        }
+
         SetStatus(isPlaying ? "Playing" : _statusLabel.Text, isPlaying
             ? Color.FromArgb(126, 188, 226)
             : _statusLabel.ForeColor);
@@ -1238,6 +2781,7 @@ internal sealed class MainForm : Form
         _startButton.Enabled = enabled && !_isPlaying;
         _dryRunButton.Enabled = enabled && !_isPlaying;
         _testPatternButton.Enabled = enabled && !_isPlaying;
+        _pauseResumeButton.Enabled = _isPlaying;
         _playSelectedMediaButton.Enabled = enabled;
         _refreshMediaButton.Enabled = enabled && !_isPlaying;
         _mediaSearchBox.Enabled = enabled;

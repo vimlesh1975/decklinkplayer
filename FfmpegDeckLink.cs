@@ -132,6 +132,7 @@ internal sealed partial class FfmpegDeckLink
             args.Add("-avoid_negative_ts");
             args.Add("make_zero");
             args.Add("-re");
+            AddSeekArguments(args, options.StartOffset);
             if (isStillImage)
             {
                 args.Add("-loop");
@@ -490,6 +491,38 @@ internal sealed partial class FfmpegDeckLink
             : value;
     }
 
+    private static void AddSeekArguments(List<string> args, TimeSpan startOffset)
+    {
+        if (startOffset <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        args.Add("-ss");
+        args.Add(FormatFfmpegTimestamp(startOffset));
+    }
+
+    internal static string FormatFfmpegTimestamp(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero)
+        {
+            value = TimeSpan.Zero;
+        }
+
+        if (value.TotalHours >= 1)
+        {
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0:00}:{1:00}:{2:00}.{3:000}",
+                (int)value.TotalHours,
+                value.Minutes,
+                value.Seconds,
+                value.Milliseconds);
+        }
+
+        return value.ToString(@"mm\:ss\.fff", CultureInfo.InvariantCulture);
+    }
+
     private static bool IsImageFile(string path)
     {
         return ImageExtensions.Contains(Path.GetExtension(path));
@@ -554,7 +587,8 @@ internal sealed record PlayRequest(
     bool NoAudio,
     bool IsInterlaced,
     string? FieldOrder,
-    bool UseTestPattern);
+    bool UseTestPattern,
+    TimeSpan StartOffset = default);
 
 internal sealed record ProcessResult(
     int ExitCode,

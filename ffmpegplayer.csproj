@@ -6,6 +6,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -21,19 +22,24 @@
     </Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="FFmpeg.AutoGen.Bindings.DynamicallyLoaded" Version="7.0.0" />
+  </ItemGroup>
+
   <Target Name="PrepareFreshTimestampedBuild" BeforeTargets="BeforeBuild">
-    <Exec
-      IgnoreExitCode="true"
-      Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference = 'SilentlyContinue'; $processes = @(Get-Process -Name '$(AssemblyName)*','ffmpeg'); if ($processes) { $processes | Stop-Process -Force; Start-Sleep -Milliseconds 500 }; $targetDir = '$(TargetDir)'; if (![string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) { Get-ChildItem -LiteralPath $targetDir -Filter '$(AssemblyName)*.exe' -File | Remove-Item -Force }&quot;" />
+    <Exec IgnoreExitCode="true" Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference = 'SilentlyContinue'; $processes = @(Get-Process -Name '$(AssemblyName)*','ffmpeg'); if ($processes) { $processes | Stop-Process -Force; Start-Sleep -Milliseconds 500 }; $targetDir = '$(TargetDir)'; if (![string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) { Get-ChildItem -LiteralPath $targetDir -Filter '$(AssemblyName)*.exe' -File | Remove-Item -Force }&quot;" />
     <Message Importance="high" Text="Closed running $(AssemblyName)/ffmpeg builds and removed old executables from $(TargetDir)" />
   </Target>
 
   <Target Name="CreateTimestampedExe" AfterTargets="Build" Condition="'$(OutputType)' == 'WinExe'">
-    <Copy
-      SourceFiles="$(TargetDir)$(AssemblyName).exe"
-      DestinationFiles="$(TargetDir)$(TimestampedExeName)" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).exe" DestinationFiles="$(TargetDir)$(TimestampedExeName)" />
     <Delete Files="$(TargetDir)$(AssemblyName).exe" />
     <Message Importance="high" Text="Created timestamped executable: $(TargetDir)$(TimestampedExeName)" />
+  </Target>
+
+  <Target Name="StartTimestampedExe" AfterTargets="CreateTimestampedExe" Condition="'$(OutputType)' == 'WinExe' and '$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$exe = '$(TargetDir)$(TimestampedExeName)'; if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe -WorkingDirectory '$(TargetDir)' -WindowStyle Normal }&quot;" />
+    <Message Importance="high" Text="Started timestamped executable: $(TargetDir)$(TimestampedExeName)" />
   </Target>
 
 </Project>

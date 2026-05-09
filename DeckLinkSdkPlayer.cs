@@ -11,6 +11,8 @@ internal sealed class DeckLinkSdkPlayer
     private const int AudioSampleRate = 48000;
     private const int AudioBytesPerSample = 4;
     private const int AudioChunkSampleFrames = 1024;
+    private static readonly object HeldVideoOutputGate = new();
+    private static HeldVideoOutput? s_heldVideoOutput;
 
     public string FormatDecoderCommand(PlayRequest request)
     {
@@ -27,14 +29,28 @@ internal sealed class DeckLinkSdkPlayer
         return string.Join(Environment.NewLine, commands);
     }
 
+    public static void ReleaseHeldVideoOutput()
+    {
+        var held = TakeHeldVideoOutput();
+        if (held is not null)
+        {
+            ReleaseHeldVideoOutput(held);
+        }
+    }
+
     public async Task<ProcessResult> PlayAsync(
         PlayRequest request,
         Action<string>? logLine = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        PlaybackPauseController? pauseController = null,
+        bool renderInitialFrameWhilePaused = false)
     {
         var mode = ResolveDisplayMode(request);
-        var deckLink = FindDeckLink(request.Device);
-        var output = (IDeckLinkOutput_v14_2_1)deckLink;
+        var acquiredOutput = AcquireDeckLinkOutput(request.Device, mode.DisplayMode, logLine);
+        var deckLink = acquiredOutput.DeckLink;
+        var output = acquiredOutput.Output;
+        var videoOutputEnabled = acquiredOutput.VideoOutputAlreadyEnabled;
+        var videoOutputHeld = false;
 
         IDeckLinkDisplayMode displayModeInfo;
         output.GetDisplayMode(mode.DisplayMode, out displayModeInfo);
@@ -48,7 +64,30 @@ internal sealed class DeckLinkSdkPlayer
         var frameBuffer = new byte[frameBytes];
         var outputLock = new object();
 
-        using var videoDecoder = StartVideoDecoder(request);
+        Process videoDecoder;
+        try
+        {
+            videoDecoder = StartVideoDecoder(request);
+        }
+        catch
+        {
+            if (videoOutputEnabled)
+            {
+                try
+                {
+                    output.DisableVideoOutput();
+                }
+                catch
+                {
+                    // Best effort cleanup when decoder startup fails.
+                }
+            }
+
+            ReleaseCom(output);
+            ReleaseCom(deckLink);
+            throw;
+        }
+
         Process? audioDecoder = null;
         var stderr = new List<string>();
         var videoStderrTask = Task.Run(
@@ -68,7 +107,16 @@ internal sealed class DeckLinkSdkPlayer
 
         try
         {
-            output.EnableVideoOutput(mode.DisplayMode, _BMDVideoOutputFlags.bmdVideoOutputFlagDefault);
+            if (!videoOutputEnabled)
+            {
+                output.EnableVideoOutput(mode.DisplayMode, _BMDVideoOutputFlags.bmdVideoOutputFlagDefault);
+                videoOutputEnabled = true;
+            }
+            else
+            {
+                logLine?.Invoke("Reusing held DeckLink video output so seek does not go blank.");
+            }
+
             if (!request.NoAudio)
             {
                 output.EnableAudioOutput(
@@ -83,7 +131,7 @@ internal sealed class DeckLinkSdkPlayer
                     () => PumpErrorAsync(audioDecoder, "audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
                 audioPumpTask = Task.Run(
-                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, logLine, cancellationToken),
+                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, logLine, cancellationToken),
                     cancellationToken);
             }
 
@@ -96,9 +144,24 @@ internal sealed class DeckLinkSdkPlayer
             var frameNumber = 0L;
             var stopwatch = Stopwatch.StartNew();
             var frameTicks = Stopwatch.Frequency * frameDuration / timeScale;
+            var pausedTicks = 0L;
+            var renderedInitialPausedFrame = false;
 
             while (!cancellationToken.IsCancellationRequested)
             {
+                var shouldRenderInitialPausedFrame =
+                    renderInitialFrameWhilePaused &&
+                    pauseController?.IsPaused == true &&
+                    frameNumber == 0 &&
+                    !renderedInitialPausedFrame;
+
+                if (pauseController?.IsPaused == true && !shouldRenderInitialPausedFrame)
+                {
+                    var pauseStartedTicks = stopwatch.ElapsedTicks;
+                    await pauseController.WaitIfPausedAsync(cancellationToken);
+                    pausedTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
+                }
+
                 if (!await ReadExactFrameAsync(videoDecoder.StandardOutput.BaseStream, frameBuffer, cancellationToken))
                 {
                     break;
@@ -129,6 +192,10 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 frameNumber++;
+                if (shouldRenderInitialPausedFrame)
+                {
+                    renderedInitialPausedFrame = true;
+                }
 
                 if (frameNumber % 25 == 0)
                 {
@@ -136,7 +203,7 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 var targetTicks = frameNumber * frameTicks;
-                var remainingTicks = targetTicks - stopwatch.ElapsedTicks;
+                var remainingTicks = targetTicks - (stopwatch.ElapsedTicks - pausedTicks);
                 if (remainingTicks > 0)
                 {
                     var delayMs = (int)Math.Min(remainingTicks * 1000 / Stopwatch.Frequency, 100);
@@ -166,6 +233,8 @@ internal sealed class DeckLinkSdkPlayer
         }
         finally
         {
+            TryKill(videoDecoder);
+            videoDecoder.Dispose();
             TryKill(audioDecoder);
             if (audioDecoder is not null)
             {
@@ -193,21 +262,116 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
-            try
+            var shouldHoldVideoOutput =
+                killedByCancellation &&
+                videoOutputEnabled &&
+                pauseController?.PreserveVideoOutputOnStop == true;
+
+            if (shouldHoldVideoOutput)
             {
-                output.DisableVideoOutput();
+                HoldVideoOutput(request.Device, mode.DisplayMode, deckLink, output, logLine);
+                videoOutputHeld = true;
             }
-            catch
+            else if (videoOutputEnabled)
             {
-                // Best effort cleanup when the card is already stopped.
+                try
+                {
+                    output.DisableVideoOutput();
+                }
+                catch
+                {
+                    // Best effort cleanup when the card is already stopped.
+                }
             }
 
-            ReleaseCom(output);
-            ReleaseCom(deckLink);
+            if (!videoOutputHeld)
+            {
+                ReleaseCom(output);
+                ReleaseCom(deckLink);
+            }
         }
     }
 
-    private static SdkDisplayMode ResolveDisplayMode(PlayRequest request)
+    internal static (IDeckLink DeckLink, IDeckLinkOutput_v14_2_1 Output, bool VideoOutputAlreadyEnabled) AcquireDeckLinkOutput(
+        string requestedDevice,
+        _BMDDisplayMode displayMode,
+        Action<string>? logLine)
+    {
+        HeldVideoOutput? heldToRelease = null;
+        lock (HeldVideoOutputGate)
+        {
+            if (s_heldVideoOutput is not null &&
+                string.Equals(s_heldVideoOutput.Device, requestedDevice, StringComparison.OrdinalIgnoreCase) &&
+                s_heldVideoOutput.DisplayMode == displayMode)
+            {
+                var held = s_heldVideoOutput;
+                s_heldVideoOutput = null;
+                return (held.DeckLink, held.Output, true);
+            }
+
+            heldToRelease = s_heldVideoOutput;
+            s_heldVideoOutput = null;
+        }
+
+        if (heldToRelease is not null)
+        {
+            logLine?.Invoke("Releasing held DeckLink frame because the replacement output changed.");
+            ReleaseHeldVideoOutput(heldToRelease);
+        }
+
+        var deckLink = FindDeckLink(requestedDevice);
+        return (deckLink, (IDeckLinkOutput_v14_2_1)deckLink, false);
+    }
+
+    internal static void HoldVideoOutput(
+        string requestedDevice,
+        _BMDDisplayMode displayMode,
+        IDeckLink deckLink,
+        IDeckLinkOutput_v14_2_1 output,
+        Action<string>? logLine)
+    {
+        var held = new HeldVideoOutput(requestedDevice, displayMode, deckLink, output);
+        HeldVideoOutput? previous;
+        lock (HeldVideoOutputGate)
+        {
+            previous = s_heldVideoOutput;
+            s_heldVideoOutput = held;
+        }
+
+        if (previous is not null)
+        {
+            ReleaseHeldVideoOutput(previous);
+        }
+
+        logLine?.Invoke("Holding last DeckLink frame during replacement playout.");
+    }
+
+    private static HeldVideoOutput? TakeHeldVideoOutput()
+    {
+        lock (HeldVideoOutputGate)
+        {
+            var held = s_heldVideoOutput;
+            s_heldVideoOutput = null;
+            return held;
+        }
+    }
+
+    private static void ReleaseHeldVideoOutput(HeldVideoOutput held)
+    {
+        try
+        {
+            held.Output.DisableVideoOutput();
+        }
+        catch
+        {
+            // Best effort cleanup when the held card output is already gone.
+        }
+
+        ReleaseCom(held.Output);
+        ReleaseCom(held.DeckLink);
+    }
+
+    internal static SdkDisplayMode ResolveDisplayMode(PlayRequest request)
     {
         if (!string.IsNullOrWhiteSpace(request.FormatCode) &&
             ModeByCode.TryGetValue(request.FormatCode, out var modeByCode))
@@ -236,7 +400,7 @@ internal sealed class DeckLinkSdkPlayer
         throw new InvalidOperationException($"DeckLink SDK engine does not yet map mode '{request.FormatCode ?? request.VideoSize + " " + request.FrameRate}'.");
     }
 
-    private static IDeckLink FindDeckLink(string requestedDevice)
+    internal static IDeckLink FindDeckLink(string requestedDevice)
     {
         var iterator = new CDeckLinkIteratorClass();
         try
@@ -336,7 +500,8 @@ internal sealed class DeckLinkSdkPlayer
         }
         else
         {
-            args.Add("-re");
+            // The SDK player clocks frames itself; avoiding -re makes seek startup much faster.
+            AddSeekArguments(args, request.StartOffset);
             if (isStillImage)
             {
                 args.Add("-loop");
@@ -399,6 +564,7 @@ internal sealed class DeckLinkSdkPlayer
         else
         {
             args.Add("-re");
+            AddSeekArguments(args, request.StartOffset);
             args.Add("-i");
             args.Add(request.InputPath);
         }
@@ -435,6 +601,17 @@ internal sealed class DeckLinkSdkPlayer
         return true;
     }
 
+    private static void AddSeekArguments(List<string> args, TimeSpan startOffset)
+    {
+        if (startOffset <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        args.Add("-ss");
+        args.Add(FfmpegDeckLink.FormatFfmpegTimestamp(startOffset));
+    }
+
     private static async Task PumpErrorAsync(
         Process process,
         string prefix,
@@ -465,6 +642,7 @@ internal sealed class DeckLinkSdkPlayer
         object outputLock,
         Process audioDecoder,
         int channels,
+        PlaybackPauseController? pauseController,
         Action<string>? logLine,
         CancellationToken cancellationToken)
     {
@@ -478,6 +656,11 @@ internal sealed class DeckLinkSdkPlayer
         {
             while (!cancellationToken.IsCancellationRequested)
             {
+                if (pauseController is not null)
+                {
+                    await pauseController.WaitIfPausedAsync(cancellationToken);
+                }
+
                 var bytesRead = await ReadAlignedAudioBlockAsync(
                     audioDecoder.StandardOutput.BaseStream,
                     managedBuffer,
@@ -574,7 +757,7 @@ internal sealed class DeckLinkSdkPlayer
         }
     }
 
-    private static void ReleaseCom(object? value)
+    internal static void ReleaseCom(object? value)
     {
         if (value is not null && Marshal.IsComObject(value))
         {
@@ -736,5 +919,11 @@ internal sealed class DeckLinkSdkPlayer
         ".webp",
     };
 
-    private sealed record SdkDisplayMode(_BMDDisplayMode DisplayMode);
+    private sealed record HeldVideoOutput(
+        string Device,
+        _BMDDisplayMode DisplayMode,
+        IDeckLink DeckLink,
+        IDeckLinkOutput_v14_2_1 Output);
+
+    internal sealed record SdkDisplayMode(_BMDDisplayMode DisplayMode);
 }

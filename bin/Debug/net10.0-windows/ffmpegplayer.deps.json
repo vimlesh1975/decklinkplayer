@@ -8,10 +8,30 @@
     ".NETCoreApp,Version=v10.0": {
       "ffmpegplayer/1.0.0": {
         "dependencies": {
+          "FFmpeg.AutoGen.Bindings.DynamicallyLoaded": "7.0.0",
           "DeckLinkAPI.Interop": "1.0.0.0"
         },
         "runtime": {
           "ffmpegplayer.dll": {}
+        }
+      },
+      "FFmpeg.AutoGen.Abstractions/7.0.0": {
+        "runtime": {
+          "lib/netstandard2.1/FFmpeg.AutoGen.Abstractions.dll": {
+            "assemblyVersion": "7.0.0.0",
+            "fileVersion": "7.0.0.0"
+          }
+        }
+      },
+      "FFmpeg.AutoGen.Bindings.DynamicallyLoaded/7.0.0": {
+        "dependencies": {
+          "FFmpeg.AutoGen.Abstractions": "7.0.0"
+        },
+        "runtime": {
+          "lib/netstandard2.1/FFmpeg.AutoGen.Bindings.DynamicallyLoaded.dll": {
+            "assemblyVersion": "7.0.0.0",
+            "fileVersion": "7.0.0.0"
+          }
         }
       },
       "DeckLinkAPI.Interop/1.0.0.0": {
@@ -29,6 +49,20 @@
       "type": "project",
       "serviceable": false,
       "sha512": ""
+    },
+    "FFmpeg.AutoGen.Abstractions/7.0.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-jI3eyoyekkumOebwydjs2SfHlrsbWRSJ9xDYEM3ELuYZhwVAXzd3BG8NV/cuTJpSMK3/TxSAbQFW789/QyAqhQ==",
+      "path": "ffmpeg.autogen.abstractions/7.0.0",
+      "hashPath": "ffmpeg.autogen.abstractions.7.0.0.nupkg.sha512"
+    },
+    "FFmpeg.AutoGen.Bindings.DynamicallyLoaded/7.0.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-Tz55+ibHU9rOtrfwV/UwNmF1RRrlrtR696NdT2CRmpjVE1cp5F7FtRAdE3qx83eGxn34Q0G1MgBj7L2+TV+53g==",
+      "path": "ffmpeg.autogen.bindings.dynamicallyloaded/7.0.0",
+      "hashPath": "ffmpeg.autogen.bindings.dynamicallyloaded.7.0.0.nupkg.sha512"
     },
     "DeckLinkAPI.Interop/1.0.0.0": {
       "type": "reference",

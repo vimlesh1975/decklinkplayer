@@ -10,7 +10,11 @@ internal static class Program
     {
         if (args.Length > 0)
         {
-            NativeConsole.AttachToParent();
+            if (!string.Equals(args[0], "preview-helper", StringComparison.OrdinalIgnoreCase))
+            {
+                NativeConsole.AttachToParent();
+            }
+
             return await Cli.RunAsync(args);
         }
 
