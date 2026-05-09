@@ -6,13 +6,13 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "ffmpegplayer/1.0.0": {
+      "decklinkplayer/1.0.0": {
         "dependencies": {
           "FFmpeg.AutoGen.Bindings.DynamicallyLoaded": "7.0.0",
           "DeckLinkAPI.Interop": "1.0.0.0"
         },
         "runtime": {
-          "ffmpegplayer.dll": {}
+          "decklinkplayer.dll": {}
         }
       },
       "FFmpeg.AutoGen.Abstractions/7.0.0": {
@@ -45,7 +45,7 @@
     }
   },
   "libraries": {
-    "ffmpegplayer/1.0.0": {
+    "decklinkplayer/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

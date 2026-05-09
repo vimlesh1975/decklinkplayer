@@ -15,7 +15,10 @@ internal sealed class DeckLinkSdkPlayer
     private static readonly object HeldVideoOutputGate = new();
     private static HeldVideoOutput? s_heldVideoOutput;
 
-    public string FormatDecoderCommand(PlayRequest request)
+    public string FormatDecoderCommand(
+        PlayRequest request,
+        bool throttleAudioRealtime = false,
+        bool monitorPcAudio = false)
     {
         var commands = new List<string>
         {
@@ -24,7 +27,11 @@ internal sealed class DeckLinkSdkPlayer
 
         if (!request.NoAudio)
         {
-            commands.Add("Audio: " + FormatCommand(request.FfmpegPath, BuildAudioDecoderArguments(request)));
+            commands.Add("Audio: " + FormatCommand(request.FfmpegPath, BuildAudioDecoderArguments(request, throttleAudioRealtime)));
+            if (monitorPcAudio)
+            {
+                commands.Add("PC Audio: " + FormatCommand(GetFfplayPath(request.FfmpegPath), BuildPcAudioMonitorArguments(request)));
+            }
         }
 
         return string.Join(Environment.NewLine, commands);
@@ -47,7 +54,8 @@ internal sealed class DeckLinkSdkPlayer
         bool renderInitialFrameWhilePaused = false,
         Action<byte[], int, int>? previewFrame = null,
         int previewFrameInterval = 5,
-        Action<double, double>? audioMeter = null)
+        Action<double, double>? audioMeter = null,
+        bool monitorPcAudio = false)
     {
         var mode = ResolveDisplayMode(request);
         var acquiredOutput = AcquireDeckLinkOutput(request.Device, mode.DisplayMode, logLine);
@@ -93,12 +101,14 @@ internal sealed class DeckLinkSdkPlayer
         }
 
         Process? audioDecoder = null;
+        Process? pcAudioMonitor = null;
         var stderr = new List<string>();
         var videoStderrTask = Task.Run(
             () => PumpErrorAsync(videoDecoder, "video-decoder", stderr, logLine, cancellationToken),
             cancellationToken);
         Task? audioStderrTask = null;
         Task? audioPumpTask = null;
+        Task? pcAudioMonitorStderrTask = null;
         var audioOutputEnabled = false;
 
         var killedByCancellation = false;
@@ -107,6 +117,7 @@ internal sealed class DeckLinkSdkPlayer
             killedByCancellation = true;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
+            TryKill(pcAudioMonitor);
         });
 
         try
@@ -130,13 +141,21 @@ internal sealed class DeckLinkSdkPlayer
                     _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
 
                 audioOutputEnabled = true;
-                audioDecoder = StartAudioDecoder(request);
+                audioDecoder = StartAudioDecoder(request, throttleRealtime: true);
                 audioStderrTask = Task.Run(
                     () => PumpErrorAsync(audioDecoder, "audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
                 audioPumpTask = Task.Run(
                     () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, cancellationToken),
                     cancellationToken);
+                if (monitorPcAudio)
+                {
+                    pcAudioMonitor = StartPcAudioMonitor(request);
+                    pcAudioMonitorStderrTask = Task.Run(
+                        () => PumpErrorAsync(pcAudioMonitor, "pc-audio", stderr, logLine, cancellationToken),
+                        cancellationToken);
+                    logLine?.Invoke("PC audio monitor started with bundled ffplay.exe.");
+                }
             }
 
             var audioDescription = request.NoAudio
@@ -228,6 +247,7 @@ internal sealed class DeckLinkSdkPlayer
 
             TryKill(videoDecoder);
             TryKill(audioDecoder);
+            TryKill(pcAudioMonitor);
 
             await videoDecoder.WaitForExitAsync(CancellationToken.None);
             if (audioDecoder is not null)
@@ -236,10 +256,17 @@ internal sealed class DeckLinkSdkPlayer
                 audioDecoder.Dispose();
                 audioDecoder = null;
             }
+            if (pcAudioMonitor is not null)
+            {
+                await pcAudioMonitor.WaitForExitAsync(CancellationToken.None);
+                pcAudioMonitor.Dispose();
+                pcAudioMonitor = null;
+            }
 
             await IgnoreCancellationAsync(videoStderrTask);
             await IgnoreCancellationAsync(audioStderrTask);
             await IgnoreCancellationAsync(audioPumpTask);
+            await IgnoreCancellationAsync(pcAudioMonitorStderrTask);
 
             return new ProcessResult(videoDecoder.ExitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
         }
@@ -248,9 +275,14 @@ internal sealed class DeckLinkSdkPlayer
             TryKill(videoDecoder);
             videoDecoder.Dispose();
             TryKill(audioDecoder);
+            TryKill(pcAudioMonitor);
             if (audioDecoder is not null)
             {
                 audioDecoder.Dispose();
+            }
+            if (pcAudioMonitor is not null)
+            {
+                pcAudioMonitor.Dispose();
             }
 
             if (audioOutputEnabled)
@@ -311,7 +343,8 @@ internal sealed class DeckLinkSdkPlayer
         PlaybackPauseController? pauseController = null,
         bool renderInitialFrameWhilePaused = false,
         Action<byte[], int, int>? previewFrame = null,
-        Action<double, double>? audioMeter = null)
+        Action<double, double>? audioMeter = null,
+        bool monitorPcAudio = false)
     {
         var size = ParseVideoSize(request.VideoSize)
             ?? throw new InvalidOperationException("Preview-only playback needs a valid video size.");
@@ -322,12 +355,14 @@ internal sealed class DeckLinkSdkPlayer
 
         using var videoDecoder = StartVideoDecoder(request);
         Process? audioDecoder = null;
+        Process? pcAudioMonitor = null;
         var stderr = new List<string>();
         var videoStderrTask = Task.Run(
             () => PumpErrorAsync(videoDecoder, "preview-video-decoder", stderr, logLine, cancellationToken),
             cancellationToken);
         Task? audioStderrTask = null;
         Task? audioPumpTask = null;
+        Task? pcAudioMonitorStderrTask = null;
         var killedByCancellation = false;
 
         using var cancellationRegistration = cancellationToken.Register(() =>
@@ -335,19 +370,28 @@ internal sealed class DeckLinkSdkPlayer
             killedByCancellation = true;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
+            TryKill(pcAudioMonitor);
         });
 
         try
         {
             if (!request.NoAudio)
             {
-                audioDecoder = StartAudioDecoder(request);
+                audioDecoder = StartAudioDecoder(request, throttleRealtime: true);
                 audioStderrTask = Task.Run(
                     () => PumpErrorAsync(audioDecoder, "preview-audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
                 audioPumpTask = Task.Run(
                     () => PumpAudioMeterOnlyAsync(audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, cancellationToken),
                     cancellationToken);
+                if (monitorPcAudio)
+                {
+                    pcAudioMonitor = StartPcAudioMonitor(request);
+                    pcAudioMonitorStderrTask = Task.Run(
+                        () => PumpErrorAsync(pcAudioMonitor, "preview-pc-audio", stderr, logLine, cancellationToken),
+                        cancellationToken);
+                    logLine?.Invoke("PC audio monitor started with bundled ffplay.exe.");
+                }
             }
 
             var audioDescription = request.NoAudio
@@ -409,6 +453,7 @@ internal sealed class DeckLinkSdkPlayer
 
             TryKill(videoDecoder);
             TryKill(audioDecoder);
+            TryKill(pcAudioMonitor);
 
             await videoDecoder.WaitForExitAsync(CancellationToken.None);
             if (audioDecoder is not null)
@@ -417,10 +462,17 @@ internal sealed class DeckLinkSdkPlayer
                 audioDecoder.Dispose();
                 audioDecoder = null;
             }
+            if (pcAudioMonitor is not null)
+            {
+                await pcAudioMonitor.WaitForExitAsync(CancellationToken.None);
+                pcAudioMonitor.Dispose();
+                pcAudioMonitor = null;
+            }
 
             await IgnoreCancellationAsync(videoStderrTask);
             await IgnoreCancellationAsync(audioStderrTask);
             await IgnoreCancellationAsync(audioPumpTask);
+            await IgnoreCancellationAsync(pcAudioMonitorStderrTask);
 
             return new ProcessResult(videoDecoder.ExitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
         }
@@ -428,9 +480,14 @@ internal sealed class DeckLinkSdkPlayer
         {
             TryKill(videoDecoder);
             TryKill(audioDecoder);
+            TryKill(pcAudioMonitor);
             if (audioDecoder is not null)
             {
                 audioDecoder.Dispose();
+            }
+            if (pcAudioMonitor is not null)
+            {
+                pcAudioMonitor.Dispose();
             }
         }
     }
@@ -591,9 +648,26 @@ internal sealed class DeckLinkSdkPlayer
         return StartDecoder(request.FfmpegPath, BuildVideoDecoderArguments(request));
     }
 
-    private static Process StartAudioDecoder(PlayRequest request)
+    private static Process StartAudioDecoder(PlayRequest request, bool throttleRealtime = false)
     {
-        return StartDecoder(request.FfmpegPath, BuildAudioDecoderArguments(request));
+        return StartDecoder(request.FfmpegPath, BuildAudioDecoderArguments(request, throttleRealtime));
+    }
+
+    private static Process StartPcAudioMonitor(PlayRequest request)
+    {
+        return StartDecoder(GetFfplayPath(request.FfmpegPath), BuildPcAudioMonitorArguments(request));
+    }
+
+    private static string GetFfplayPath(string ffmpegPath)
+    {
+        var directory = Path.GetDirectoryName(ffmpegPath) ?? AppContext.BaseDirectory;
+        var ffplayPath = Path.Combine(directory, "ffplay.exe");
+        if (File.Exists(ffplayPath))
+        {
+            return ffplayPath;
+        }
+
+        throw new InvalidOperationException($"ffplay.exe not found next to {Path.GetFileName(ffmpegPath)} for PC audio monitor.");
     }
 
     private static Process StartDecoder(string ffmpegPath, IReadOnlyList<string> arguments)
@@ -683,7 +757,7 @@ internal sealed class DeckLinkSdkPlayer
         return args;
     }
 
-    private static IReadOnlyList<string> BuildAudioDecoderArguments(PlayRequest request)
+    private static IReadOnlyList<string> BuildAudioDecoderArguments(PlayRequest request, bool throttleRealtime)
     {
         var args = new List<string>
         {
@@ -697,6 +771,11 @@ internal sealed class DeckLinkSdkPlayer
             args.Add("-1");
         }
 
+        if (throttleRealtime)
+        {
+            args.Add("-re");
+        }
+
         if (request.UseTestPattern)
         {
             args.Add("-f");
@@ -706,7 +785,6 @@ internal sealed class DeckLinkSdkPlayer
         }
         else
         {
-            args.Add("-re");
             AddSeekArguments(args, request.StartOffset);
             args.Add("-i");
             args.Add(request.InputPath);
@@ -724,6 +802,47 @@ internal sealed class DeckLinkSdkPlayer
         args.Add("-f");
         args.Add("s32le");
         args.Add("pipe:1");
+        return args;
+    }
+
+    private static IReadOnlyList<string> BuildPcAudioMonitorArguments(PlayRequest request)
+    {
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nodisp",
+            "-vn",
+            "-sync",
+            "audio",
+            "-volume",
+            "100",
+        };
+
+        if (request.Loop && !request.UseTestPattern)
+        {
+            args.Add("-loop");
+            args.Add("0");
+        }
+        else
+        {
+            args.Add("-autoexit");
+        }
+
+        if (request.UseTestPattern)
+        {
+            args.Add("-f");
+            args.Add("lavfi");
+            args.Add("-i");
+            args.Add($"anullsrc=r={AudioSampleRate}:cl=stereo");
+        }
+        else
+        {
+            AddSeekArguments(args, request.StartOffset);
+            args.Add(request.InputPath);
+        }
+
         return args;
     }
 

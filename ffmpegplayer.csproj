@@ -3,6 +3,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>decklinkplayer</AssemblyName>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -27,8 +28,8 @@
   </ItemGroup>
 
   <Target Name="PrepareFreshTimestampedBuild" BeforeTargets="BeforeBuild">
-    <Exec IgnoreExitCode="true" Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference = 'SilentlyContinue'; $processes = @(Get-Process -Name '$(AssemblyName)*','ffmpeg'); if ($processes) { $processes | Stop-Process -Force; Start-Sleep -Milliseconds 500 }; $targetDir = '$(TargetDir)'; if (![string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) { Get-ChildItem -LiteralPath $targetDir -Filter '$(AssemblyName)*.exe' -File | Remove-Item -Force }&quot;" />
-    <Message Importance="high" Text="Closed running $(AssemblyName)/ffmpeg builds and removed old executables from $(TargetDir)" />
+    <Exec IgnoreExitCode="true" Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference = 'SilentlyContinue'; $processes = @(Get-Process -Name '$(AssemblyName)*','ffmpegplayer*','ffmpeg'); if ($processes) { $processes | Stop-Process -Force; Start-Sleep -Milliseconds 500 }; $targetDir = '$(TargetDir)'; if (![string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path -LiteralPath $targetDir)) { foreach ($filter in @('$(AssemblyName)*.exe','ffmpegplayer*.exe')) { Get-ChildItem -LiteralPath $targetDir -Filter $filter -File | Remove-Item -Force } }&quot;" />
+    <Message Importance="high" Text="Closed running $(AssemblyName)/ffmpegplayer/ffmpeg builds and removed old player executables from $(TargetDir)" />
   </Target>
 
   <Target Name="CreateTimestampedExe" AfterTargets="Build" Condition="'$(OutputType)' == 'WinExe'">

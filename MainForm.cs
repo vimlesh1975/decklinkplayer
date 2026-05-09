@@ -12,10 +12,8 @@ internal sealed class MainForm : Form
     private const string DefaultDeckLinkDeviceName = "DeckLink SDI 4K";
     private const string DefaultDeckLinkModeCode = "Hi50";
     private const int FixedClientWidth = 1282;
-    private const int FixedClientHeight = 980;
     private const int RootPadding = 18;
     private const int HeaderRowHeight = 62;
-    private const int MainAreaHeight = 764;
     private const int ActionRowHeight = 110;
     private const int RemainingTimeRowHeight = 28;
     private const int CurrentTimeRowHeight = 28;
@@ -32,6 +30,12 @@ internal sealed class MainForm : Form
     private const int SeekGroupWidth = AppPreviewPanelWidth;
     private const int TransportSpanWidth = SourceColumnWidth + PreviewColumnWidth;
     private const int DetailsPanelHeight = 320;
+    private const int SettingsAreaVerticalPadding = 12;
+    private const int CollapsedSettingsAreaHeight =
+        AppPreviewAreaHeight + ActionRowHeight + ToggleRowHeight + SettingsAreaVerticalPadding;
+    private const int ExpandedSettingsAreaHeight = CollapsedSettingsAreaHeight + DetailsPanelHeight;
+    private const int CollapsedClientHeight = RootPadding * 2 + HeaderRowHeight + CollapsedSettingsAreaHeight;
+    private const int ExpandedClientHeight = RootPadding * 2 + HeaderRowHeight + ExpandedSettingsAreaHeight;
     // In-process FFmpeg decoding can crash the whole GUI with native access violations.
     // Keep the implementation available for an isolated helper process later, but do not call it here.
     private const bool EnableInProcessNativeSeekPreview = false;
@@ -60,6 +64,7 @@ internal sealed class MainForm : Form
     private readonly Button _toggleSettingsButton = new();
     private readonly Button _toggleLogButton = new();
     private readonly CheckBox _previewOnlyCheckBox = new();
+    private readonly CheckBox _pcAudioCheckBox = new();
     private readonly Button _refreshDevicesButton = new();
     private readonly Button _refreshModesButton = new();
     private readonly Button _seekBackOneSecondButton = new();
@@ -84,7 +89,6 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _playbackPositionTimer = new() { Interval = 500 };
     private readonly System.Windows.Forms.Timer _scrubSeekTimer = new() { Interval = 140 };
     private readonly System.Windows.Forms.Timer _cpuUsageTimer = new() { Interval = 1000 };
-    private readonly Dictionary<int, TimeSpan> _lastCpuSamples = new();
 
     private TableLayoutPanel? _settingsSplit;
     private TableLayoutPanel? _detailsPanelLayout;
@@ -136,7 +140,10 @@ internal sealed class MainForm : Form
     private bool _playbackDurationUnavailable;
     private bool _playbackIsStillImage;
     private bool _playbackIsTestPattern;
-    private DateTime _lastCpuSampleAt;
+    private ulong _lastSystemIdleTime;
+    private ulong _lastSystemKernelTime;
+    private ulong _lastSystemUserTime;
+    private bool _hasSystemCpuSample;
 
     public MainForm()
     {
@@ -144,9 +151,7 @@ internal sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(FixedClientWidth, FixedClientHeight);
-        MinimumSize = Size;
-        MaximumSize = Size;
+        SetFixedClientHeight(CollapsedClientHeight);
         BackColor = Color.FromArgb(22, 25, 29);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
 
@@ -163,8 +168,7 @@ internal sealed class MainForm : Form
         _durationProbeTimer.Tick += DurationProbeTimer_Tick;
         _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
-        _lastCpuSampleAt = DateTime.UtcNow;
-        StoreCpuSamples(CaptureCpuSamples());
+        InitializeCpuUsageSampling();
         _cpuUsageTimer.Tick += (_, _) => UpdateCpuUsageLabel();
         _cpuUsageTimer.Start();
         ScheduleDurationProbe();
@@ -190,6 +194,15 @@ internal sealed class MainForm : Form
         return string.IsNullOrWhiteSpace(executableName) ? "DeckLink Player" : executableName;
     }
 
+    private void SetFixedClientHeight(int clientHeight)
+    {
+        MinimumSize = Size.Empty;
+        MaximumSize = Size.Empty;
+        ClientSize = new Size(FixedClientWidth, clientHeight);
+        MinimumSize = Size;
+        MaximumSize = Size;
+    }
+
     private void BuildUi()
     {
         var root = new TableLayoutPanel
@@ -202,7 +215,7 @@ internal sealed class MainForm : Form
         };
 
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, HeaderRowHeight));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, MainAreaHeight + ActionRowHeight));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(root);
 
         root.Controls.Add(BuildHeader(), 0, 0);
@@ -232,7 +245,7 @@ internal sealed class MainForm : Form
         _statusLabel.ForeColor = Color.FromArgb(130, 210, 164);
         _statusLabel.Location = new Point(304, 18);
 
-        _cpuUsageLabel.Text = "CPU 0%";
+        _cpuUsageLabel.Text = "PC CPU 0%";
         _cpuUsageLabel.AutoSize = false;
         _cpuUsageLabel.Width = 230;
         _cpuUsageLabel.Font = new Font("Segoe UI Semibold", 20F, FontStyle.Bold, GraphicsUnit.Point);
@@ -695,6 +708,15 @@ internal sealed class MainForm : Form
         panel.Controls.Add(_toggleSettingsButton);
         panel.Controls.Add(_toggleLogButton);
         panel.Controls.Add(_previewOnlyCheckBox);
+
+        _pcAudioCheckBox.Text = "PC audio";
+        _pcAudioCheckBox.Checked = false;
+        _pcAudioCheckBox.AutoSize = false;
+        _pcAudioCheckBox.Size = new Size(104, 34);
+        _pcAudioCheckBox.Margin = new Padding(0);
+        _pcAudioCheckBox.TextAlign = ContentAlignment.MiddleLeft;
+        _pcAudioCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
+        panel.Controls.Add(_pcAudioCheckBox);
         return panel;
     }
 
@@ -901,9 +923,12 @@ internal sealed class MainForm : Form
         detailsRow.SizeType = SizeType.Absolute;
         detailsRow.Height = anyVisible ? DetailsPanelHeight : 0;
         _settingsSplit.PerformLayout();
+        SetFixedClientHeight(anyVisible ? ExpandedClientHeight : CollapsedClientHeight);
     }
 
     private bool PreviewOnlyMode => _previewOnlyCheckBox.Checked;
+
+    private bool PcAudioMode => _pcAudioCheckBox.Checked;
 
     private string PlaybackTargetName => PreviewOnlyMode ? "preview" : "playout";
 
@@ -1105,13 +1130,7 @@ internal sealed class MainForm : Form
 
     private void BrowseMediaRoot()
     {
-        using var dialog = new FolderBrowserDialog
-        {
-            Description = "Choose media library folder",
-            SelectedPath = Directory.Exists(_mediaRootPath) ? _mediaRootPath : DefaultMediaRootPath,
-            UseDescriptionForTitle = true,
-        };
-
+        using var dialog = new MediaRootDialog(_mediaRootPath, DefaultMediaRootPath);
         if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath))
         {
             return;
@@ -2988,20 +3007,28 @@ internal sealed class MainForm : Form
         try
         {
             var previewOnly = PreviewOnlyMode;
+            var pcAudio = PcAudioMode;
             var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset);
             var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
             request = _deckLink.ApplyModeDefaults(request, selectedMode);
-            var commandText = _sdkPlayer.FormatDecoderCommand(request);
+            var commandText = _sdkPlayer.FormatDecoderCommand(
+                request,
+                throttleAudioRealtime: true,
+                monitorPcAudio: pcAudio);
 
             AppendLog("");
             AppendLog("Command:");
             AppendLog(previewOnly ? "Preview-only decoder command:" : "SDK decoder command:");
             AppendLog(commandText);
             AppendLog(previewOnly
-                ? "DeckLink output disabled: app preview only."
+                ? pcAudio
+                    ? "DeckLink output disabled: app preview with PC audio monitor."
+                    : "DeckLink output disabled: app preview only."
                 : request.NoAudio
                     ? "DeckLink output: Blackmagic SDK direct video frames."
-                    : "DeckLink output: Blackmagic SDK direct video frames with embedded audio.");
+                    : pcAudio
+                        ? "DeckLink output: Blackmagic SDK direct video frames with embedded audio and PC audio monitor."
+                        : "DeckLink output: Blackmagic SDK direct video frames with embedded audio.");
 
             if (dryRun)
             {
@@ -3057,7 +3084,8 @@ internal sealed class MainForm : Form
                         pauseController,
                         renderInitialFrameWhilePaused: startPaused,
                         previewFrame: UpdateAppPreviewFrame,
-                        audioMeter: UpdateAudioMeters)
+                        audioMeter: UpdateAudioMeters,
+                        monitorPcAudio: pcAudio)
                     : _sdkPlayer.PlayAsync(
                         request,
                         LogPlaybackLine,
@@ -3066,7 +3094,8 @@ internal sealed class MainForm : Form
                         renderInitialFrameWhilePaused: startPaused,
                         previewFrame: UpdateAppPreviewFrame,
                         previewFrameInterval: 5,
-                        audioMeter: UpdateAudioMeters),
+                        audioMeter: UpdateAudioMeters,
+                        monitorPcAudio: pcAudio),
                 _playbackCancellation.Token);
 
             AppendLog(result.Cancelled
@@ -3439,6 +3468,7 @@ internal sealed class MainForm : Form
         _mediaSearchBox.Enabled = true;
         _clearMediaSearchButton.Enabled = true;
         _previewOnlyCheckBox.Enabled = !isPlaying;
+        _pcAudioCheckBox.Enabled = !isPlaying;
         _mediaTree.Enabled = true;
         if (!isPlaying)
         {
@@ -3461,6 +3491,7 @@ internal sealed class MainForm : Form
         _mediaSearchBox.Enabled = enabled;
         _clearMediaSearchButton.Enabled = enabled;
         _previewOnlyCheckBox.Enabled = enabled && !_isPlaying;
+        _pcAudioCheckBox.Enabled = enabled && !_isPlaying;
         _mediaTree.Enabled = enabled;
         _stopButton.Enabled = _isPlaying;
     }
@@ -3471,108 +3502,108 @@ internal sealed class MainForm : Form
         _statusLabel.ForeColor = color;
     }
 
-    private void UpdateCpuUsageLabel()
+    private void InitializeCpuUsageSampling()
     {
-        var now = DateTime.UtcNow;
-        var elapsedMilliseconds = (now - _lastCpuSampleAt).TotalMilliseconds;
-        var samples = CaptureCpuSamples();
-
-        if (elapsedMilliseconds <= 0 || _lastCpuSamples.Count == 0)
+        if (!TryGetSystemCpuTimes(out _lastSystemIdleTime, out _lastSystemKernelTime, out _lastSystemUserTime))
         {
-            StoreCpuSamples(samples);
-            _lastCpuSampleAt = now;
+            _hasSystemCpuSample = false;
+            _cpuUsageLabel.Text = "PC CPU --";
             return;
         }
 
-        var cpuMilliseconds = 0d;
-        foreach (var (processId, totalProcessorTime) in samples)
-        {
-            if (_lastCpuSamples.TryGetValue(processId, out var previousProcessorTime) &&
-                totalProcessorTime >= previousProcessorTime)
-            {
-                cpuMilliseconds += (totalProcessorTime - previousProcessorTime).TotalMilliseconds;
-            }
-        }
-
-        StoreCpuSamples(samples);
-        _lastCpuSampleAt = now;
-
-        var cpuPercent = cpuMilliseconds / elapsedMilliseconds / Environment.ProcessorCount * 100d;
-        cpuPercent = Math.Clamp(cpuPercent, 0d, 999d);
-        _cpuUsageLabel.Text = $"CPU {cpuPercent:0}%";
+        _hasSystemCpuSample = true;
+        _cpuUsageLabel.Text = "PC CPU 0%";
     }
 
-    private Dictionary<int, TimeSpan> CaptureCpuSamples()
+    private void UpdateCpuUsageLabel()
     {
-        var samples = new Dictionary<int, TimeSpan>();
-
-        using (var currentProcess = Process.GetCurrentProcess())
+        if (!TryGetSystemCpuTimes(out var idleTime, out var kernelTime, out var userTime))
         {
-            AddCpuSample(samples, currentProcess);
+            _cpuUsageLabel.Text = "PC CPU --";
+            return;
         }
 
-        string? ffmpegPath = null;
-        try
+        if (!_hasSystemCpuSample ||
+            idleTime < _lastSystemIdleTime ||
+            kernelTime < _lastSystemKernelTime ||
+            userTime < _lastSystemUserTime)
         {
-            ffmpegPath = Path.GetFullPath(GetFfmpegPath());
-        }
-        catch
-        {
-            // CPU display should never interrupt playback if the path cannot be resolved.
-        }
-
-        if (!string.IsNullOrWhiteSpace(ffmpegPath))
-        {
-            foreach (var process in Process.GetProcessesByName("ffmpeg"))
-            {
-                using (process)
-                {
-                    if (IsBundledFfmpegProcess(process, ffmpegPath))
-                    {
-                        AddCpuSample(samples, process);
-                    }
-                }
-            }
+            _lastSystemIdleTime = idleTime;
+            _lastSystemKernelTime = kernelTime;
+            _lastSystemUserTime = userTime;
+            _hasSystemCpuSample = true;
+            _cpuUsageLabel.Text = "PC CPU 0%";
+            return;
         }
 
-        return samples;
+        var idleDelta = idleTime - _lastSystemIdleTime;
+        var kernelDelta = kernelTime - _lastSystemKernelTime;
+        var userDelta = userTime - _lastSystemUserTime;
+        var totalDelta = kernelDelta + userDelta;
+
+        _lastSystemIdleTime = idleTime;
+        _lastSystemKernelTime = kernelTime;
+        _lastSystemUserTime = userTime;
+
+        if (totalDelta == 0)
+        {
+            _cpuUsageLabel.Text = "PC CPU 0%";
+            return;
+        }
+
+        var busyDelta = totalDelta > idleDelta ? totalDelta - idleDelta : 0;
+        var cpuPercent = Math.Clamp((double)busyDelta / totalDelta * 100d, 0d, 100d);
+        _cpuUsageLabel.Text = $"PC CPU {cpuPercent:0}%";
+        _cpuUsageLabel.ForeColor = GetCpuUsageColor(cpuPercent);
     }
 
-    private void StoreCpuSamples(Dictionary<int, TimeSpan> samples)
+    private static Color GetCpuUsageColor(double cpuPercent)
     {
-        _lastCpuSamples.Clear();
-        foreach (var (processId, totalProcessorTime) in samples)
+        if (cpuPercent >= 85)
         {
-            _lastCpuSamples[processId] = totalProcessorTime;
+            return Color.FromArgb(229, 113, 105);
         }
+
+        if (cpuPercent >= 60)
+        {
+            return Color.FromArgb(232, 181, 105);
+        }
+
+        return Color.FromArgb(130, 210, 164);
     }
 
-    private static void AddCpuSample(Dictionary<int, TimeSpan> samples, Process process)
+    private static bool TryGetSystemCpuTimes(out ulong idleTime, out ulong kernelTime, out ulong userTime)
     {
-        try
-        {
-            if (!process.HasExited)
-            {
-                samples[process.Id] = process.TotalProcessorTime;
-            }
-        }
-        catch
-        {
-            // Process may exit while sampling; ignore this one tick.
-        }
-    }
+        idleTime = 0;
+        kernelTime = 0;
+        userTime = 0;
 
-    private static bool IsBundledFfmpegProcess(Process process, string ffmpegPath)
-    {
-        try
-        {
-            var processPath = process.MainModule?.FileName;
-            return !string.IsNullOrWhiteSpace(processPath) &&
-                string.Equals(Path.GetFullPath(processPath), ffmpegPath, StringComparison.OrdinalIgnoreCase);
-        }
-        catch
+        if (!GetSystemTimes(out var idleFileTime, out var kernelFileTime, out var userFileTime))
         {
             return false;
+        }
+
+        idleTime = idleFileTime.ToUInt64();
+        kernelTime = kernelFileTime.ToUInt64();
+        userTime = userFileTime.ToUInt64();
+        return true;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetSystemTimes(
+        out NativeFileTime idleTime,
+        out NativeFileTime kernelTime,
+        out NativeFileTime userTime);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeFileTime
+    {
+        public uint LowDateTime;
+        public uint HighDateTime;
+
+        public ulong ToUInt64()
+        {
+            return ((ulong)HighDateTime << 32) | LowDateTime;
         }
     }
 
