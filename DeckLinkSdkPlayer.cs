@@ -11,7 +11,9 @@ internal sealed class DeckLinkSdkPlayer
     private const int BytesPerPixelUyvy = 2;
     private const int AudioSampleRate = 48000;
     private const int AudioBytesPerSample = 4;
-    private const int AudioChunkSampleFrames = 1024;
+    private const int AudioChunkSampleFrames = AudioSampleRate / 100;
+    private const int AudioWriteZeroRetryDelayMs = 2;
+    private const int AudioWriteStallLogMilliseconds = 500;
     private static readonly object HeldVideoOutputGate = new();
     private static HeldVideoOutput? s_heldVideoOutput;
 
@@ -960,15 +962,14 @@ internal sealed class DeckLinkSdkPlayer
 
                 Marshal.Copy(managedBuffer, 0, unmanagedBuffer, bytesRead);
 
-                uint written;
-                lock (outputLock)
-                {
-                    output.WriteAudioSamplesSync(unmanagedBuffer, (uint)sampleFrameCount, out written);
-                }
-                if (written != sampleFrameCount)
-                {
-                    logLine?.Invoke($"sdk_audio_short_write requested={sampleFrameCount} written={written}");
-                }
+                var written = await WriteAudioSamplesFullyAsync(
+                    output,
+                    outputLock,
+                    unmanagedBuffer,
+                    sampleFrameCount,
+                    bytesPerSampleFrame,
+                    logLine,
+                    cancellationToken);
 
                 var previousTotal = totalWritten;
                 totalWritten += written;
@@ -1056,6 +1057,53 @@ internal sealed class DeckLinkSdkPlayer
         {
             // Expected during Stop.
         }
+    }
+
+    private static async Task<uint> WriteAudioSamplesFullyAsync(
+        IDeckLinkOutput_v14_2_1 output,
+        object outputLock,
+        IntPtr buffer,
+        int sampleFrameCount,
+        int bytesPerSampleFrame,
+        Action<string>? logLine,
+        CancellationToken cancellationToken)
+    {
+        var totalWritten = 0u;
+        var zeroWriteWait = Stopwatch.StartNew();
+        var loggedStall = false;
+
+        while (totalWritten < sampleFrameCount)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var remaining = (uint)sampleFrameCount - totalWritten;
+            uint written;
+            lock (outputLock)
+            {
+                output.WriteAudioSamplesSync(
+                    IntPtr.Add(buffer, checked((int)totalWritten * bytesPerSampleFrame)),
+                    remaining,
+                    out written);
+            }
+
+            if (written > 0)
+            {
+                totalWritten += written;
+                zeroWriteWait.Restart();
+                loggedStall = false;
+                continue;
+            }
+
+            if (!loggedStall && zeroWriteWait.ElapsedMilliseconds >= AudioWriteStallLogMilliseconds)
+            {
+                logLine?.Invoke($"sdk_audio_wait remaining={remaining}");
+                loggedStall = true;
+            }
+
+            await Task.Delay(AudioWriteZeroRetryDelayMs, cancellationToken);
+        }
+
+        return totalWritten;
     }
 
     private static void AccumulateMeterPeaks(

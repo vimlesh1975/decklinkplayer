@@ -68,10 +68,12 @@ internal sealed class MainForm : Form
     private readonly Button _refreshDevicesButton = new();
     private readonly Button _refreshModesButton = new();
     private readonly Button _seekBackOneSecondButton = new();
+    private readonly Button _seekBackTenFramesButton = new();
     private readonly Button _seekBackFiveFramesButton = new();
     private readonly Button _seekBackOneFrameButton = new();
     private readonly Button _seekForwardOneFrameButton = new();
     private readonly Button _seekForwardFiveFramesButton = new();
+    private readonly Button _seekForwardTenFramesButton = new();
     private readonly Button _seekForwardOneSecondButton = new();
     private readonly TextBox _logBox = new();
     private readonly PictureBox _appPreviewBox = new();
@@ -140,6 +142,7 @@ internal sealed class MainForm : Form
     private bool _playbackDurationUnavailable;
     private bool _playbackIsStillImage;
     private bool _playbackIsTestPattern;
+    private int _appPreviewFramePending;
     private ulong _lastSystemIdleTime;
     private ulong _lastSystemKernelTime;
     private ulong _lastSystemUserTime;
@@ -625,20 +628,22 @@ internal sealed class MainForm : Form
 
         _stopButton.Text = "Stop";
         StyleButton(_stopButton, Color.FromArgb(149, 64, 58));
-        _stopButton.Width = 100;
+        _stopButton.Width = 72;
         ConfigureTransportButton(_stopButton);
         _stopButton.Enabled = false;
         _stopButton.Click += (_, _) => StopPlayback();
 
         _pauseResumeButton.Text = "Pause";
         StyleButton(_pauseResumeButton, Color.FromArgb(183, 126, 46));
-        _pauseResumeButton.Width = 110;
+        _pauseResumeButton.Width = 82;
         ConfigureTransportButton(_pauseResumeButton);
         _pauseResumeButton.Enabled = false;
         _pauseResumeButton.Click += async (_, _) => await TogglePauseResumePlaybackAsync();
 
         ConfigureSeekStepButton(_seekBackOneSecondButton, "-1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(-1)));
         ConfigureSeekStepButton(_seekForwardOneSecondButton, "+1 sec", () => SeekRelativeAsync(TimeSpan.FromSeconds(1)));
+        ConfigureSeekStepButton(_seekBackTenFramesButton, "-10 fr", () => SeekRelativeFramesAsync(-10));
+        ConfigureSeekStepButton(_seekForwardTenFramesButton, "+10 fr", () => SeekRelativeFramesAsync(10));
         ConfigureSeekStepButton(_seekBackFiveFramesButton, "-5 fr", () => SeekRelativeFramesAsync(-5));
         ConfigureSeekStepButton(_seekForwardFiveFramesButton, "+5 fr", () => SeekRelativeFramesAsync(5));
         ConfigureSeekStepButton(_seekBackOneFrameButton, "-1 fr", () => SeekRelativeFramesAsync(-1));
@@ -649,6 +654,7 @@ internal sealed class MainForm : Form
             new Control[]
             {
                 _seekBackOneSecondButton,
+                _seekBackTenFramesButton,
                 _seekBackFiveFramesButton,
                 _seekBackOneFrameButton,
             },
@@ -661,6 +667,7 @@ internal sealed class MainForm : Form
             {
                 _seekForwardOneFrameButton,
                 _seekForwardFiveFramesButton,
+                _seekForwardTenFramesButton,
                 _seekForwardOneSecondButton,
             }));
         return panel;
@@ -1924,6 +1931,11 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (Interlocked.Exchange(ref _appPreviewFramePending, 1) == 1)
+        {
+            return;
+        }
+
         try
         {
             var bitmap = CreatePreviewBitmap(uyvyFrame, width, height, AppPreviewWidth, AppPreviewHeight);
@@ -1931,6 +1943,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            Interlocked.Exchange(ref _appPreviewFramePending, 0);
             AppendLog($"App preview frame skipped: {ex.Message}");
         }
     }
@@ -1940,6 +1953,7 @@ internal sealed class MainForm : Form
         if (IsDisposed)
         {
             bitmap.Dispose();
+            Interlocked.Exchange(ref _appPreviewFramePending, 0);
             return;
         }
 
@@ -1952,6 +1966,7 @@ internal sealed class MainForm : Form
             catch
             {
                 bitmap.Dispose();
+                Interlocked.Exchange(ref _appPreviewFramePending, 0);
             }
 
             return;
@@ -1960,6 +1975,7 @@ internal sealed class MainForm : Form
         var previous = _appPreviewBox.Image;
         _appPreviewBox.Image = bitmap;
         previous?.Dispose();
+        Interlocked.Exchange(ref _appPreviewFramePending, 0);
     }
 
     private void DisposeAppPreviewImage()
@@ -1967,6 +1983,7 @@ internal sealed class MainForm : Form
         var image = _appPreviewBox.Image;
         _appPreviewBox.Image = null;
         image?.Dispose();
+        Interlocked.Exchange(ref _appPreviewFramePending, 0);
     }
 
     private void UpdateAudioMeters(double leftDbfs, double rightDbfs)
@@ -2720,10 +2737,12 @@ internal sealed class MainForm : Form
     {
         _positionBar.Enabled = enabled;
         _seekBackOneSecondButton.Enabled = enabled;
+        _seekBackTenFramesButton.Enabled = enabled;
         _seekBackFiveFramesButton.Enabled = enabled;
         _seekBackOneFrameButton.Enabled = enabled;
         _seekForwardOneFrameButton.Enabled = enabled;
         _seekForwardFiveFramesButton.Enabled = enabled;
+        _seekForwardTenFramesButton.Enabled = enabled;
         _seekForwardOneSecondButton.Enabled = enabled;
     }
 
@@ -3093,7 +3112,7 @@ internal sealed class MainForm : Form
                         pauseController,
                         renderInitialFrameWhilePaused: startPaused,
                         previewFrame: UpdateAppPreviewFrame,
-                        previewFrameInterval: 5,
+                        previewFrameInterval: 1,
                         audioMeter: UpdateAudioMeters,
                         monitorPcAudio: pcAudio),
                 _playbackCancellation.Token);
