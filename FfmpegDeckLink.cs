@@ -596,7 +596,16 @@ internal sealed record PlayRequest(
     string? FieldOrder,
     bool UseTestPattern,
     TimeSpan StartOffset = default,
-    TimeSpan? Duration = null);
+    TimeSpan? Duration = null,
+    PlaylistTransitionSegment? TransitionSegment = null);
+
+internal sealed record PlaylistTransitionSegment(
+    string NextInputPath,
+    TimeSpan NextStartOffset,
+    TimeSpan NextDuration,
+    string Transition,
+    TimeSpan Duration,
+    TimeSpan Offset);
 
 internal sealed record ProcessResult(
     int ExitCode,

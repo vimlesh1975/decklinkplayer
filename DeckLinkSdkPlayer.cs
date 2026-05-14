@@ -111,6 +111,7 @@ internal sealed class DeckLinkSdkPlayer
         Task? audioStderrTask = null;
         Task? audioPumpTask = null;
         Task? pcAudioMonitorStderrTask = null;
+        ProcessPauseBinding? pcAudioPauseBinding = null;
         var audioOutputEnabled = false;
 
         var killedByCancellation = false;
@@ -153,6 +154,7 @@ internal sealed class DeckLinkSdkPlayer
                 if (monitorPcAudio)
                 {
                     pcAudioMonitor = StartPcAudioMonitor(request);
+                    pcAudioPauseBinding = new ProcessPauseBinding(pcAudioMonitor, pauseController, logLine, "pc-audio");
                     pcAudioMonitorStderrTask = Task.Run(
                         () => PumpErrorAsync(pcAudioMonitor, "pc-audio", stderr, logLine, cancellationToken),
                         cancellationToken);
@@ -247,6 +249,8 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
+            pcAudioPauseBinding?.Dispose();
+            pcAudioPauseBinding = null;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
             TryKill(pcAudioMonitor);
@@ -274,6 +278,7 @@ internal sealed class DeckLinkSdkPlayer
         }
         finally
         {
+            pcAudioPauseBinding?.Dispose();
             TryKill(videoDecoder);
             videoDecoder.Dispose();
             TryKill(audioDecoder);
@@ -365,6 +370,7 @@ internal sealed class DeckLinkSdkPlayer
         Task? audioStderrTask = null;
         Task? audioPumpTask = null;
         Task? pcAudioMonitorStderrTask = null;
+        ProcessPauseBinding? pcAudioPauseBinding = null;
         var killedByCancellation = false;
 
         using var cancellationRegistration = cancellationToken.Register(() =>
@@ -389,6 +395,7 @@ internal sealed class DeckLinkSdkPlayer
                 if (monitorPcAudio)
                 {
                     pcAudioMonitor = StartPcAudioMonitor(request);
+                    pcAudioPauseBinding = new ProcessPauseBinding(pcAudioMonitor, pauseController, logLine, "preview-pc-audio");
                     pcAudioMonitorStderrTask = Task.Run(
                         () => PumpErrorAsync(pcAudioMonitor, "preview-pc-audio", stderr, logLine, cancellationToken),
                         cancellationToken);
@@ -453,6 +460,8 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
+            pcAudioPauseBinding?.Dispose();
+            pcAudioPauseBinding = null;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
             TryKill(pcAudioMonitor);
@@ -480,6 +489,7 @@ internal sealed class DeckLinkSdkPlayer
         }
         finally
         {
+            pcAudioPauseBinding?.Dispose();
             TryKill(videoDecoder);
             TryKill(audioDecoder);
             TryKill(pcAudioMonitor);
@@ -704,6 +714,11 @@ internal sealed class DeckLinkSdkPlayer
             "-nostats",
         };
 
+        if (request.TransitionSegment is not null && !request.UseTestPattern)
+        {
+            return BuildTransitionVideoDecoderArguments(request, request.TransitionSegment);
+        }
+
         if (request.Loop && !request.UseTestPattern && !isStillImage)
         {
             args.Add("-stream_loop");
@@ -762,6 +777,14 @@ internal sealed class DeckLinkSdkPlayer
             "-nostats",
         };
 
+        if (request.TransitionSegment is PlaylistTransitionSegment segment &&
+            !request.UseTestPattern &&
+            !IsImageFile(segment.NextInputPath) &&
+            !IsImageFile(request.InputPath))
+        {
+            return BuildTransitionAudioDecoderArguments(request, segment, throttleRealtime);
+        }
+
         if (request.Loop && !request.UseTestPattern)
         {
             args.Add("-stream_loop");
@@ -810,6 +833,160 @@ internal sealed class DeckLinkSdkPlayer
         args.Add("s32le");
         args.Add("pipe:1");
         return args;
+    }
+
+    private static IReadOnlyList<string> BuildTransitionVideoDecoderArguments(PlayRequest request, PlaylistTransitionSegment segment)
+    {
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-nostats",
+        };
+
+        AddTransitionInputArguments(args, request.InputPath, request.StartOffset, request.Duration, request.FrameRate);
+        AddTransitionInputArguments(args, segment.NextInputPath, segment.NextStartOffset, segment.NextDuration, request.FrameRate);
+        args.Add("-filter_complex");
+        args.Add(BuildTransitionVideoFilter(request, segment));
+        args.Add("-map");
+        args.Add("[vout]");
+        args.Add("-an");
+        args.Add("-pix_fmt");
+        args.Add("uyvy422");
+        args.Add("-f");
+        args.Add("rawvideo");
+        args.Add("pipe:1");
+        return args;
+    }
+
+    private static IReadOnlyList<string> BuildTransitionAudioDecoderArguments(
+        PlayRequest request,
+        PlaylistTransitionSegment segment,
+        bool throttleRealtime)
+    {
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-nostats",
+        };
+
+        if (throttleRealtime)
+        {
+            args.Add("-re");
+        }
+
+        AddTransitionInputArguments(args, request.InputPath, request.StartOffset, request.Duration, request.FrameRate);
+        if (throttleRealtime)
+        {
+            args.Add("-re");
+        }
+
+        AddTransitionInputArguments(args, segment.NextInputPath, segment.NextStartOffset, segment.NextDuration, request.FrameRate);
+        args.Add("-filter_complex");
+        args.Add(BuildTransitionAudioFilter(segment));
+        args.Add("-map");
+        args.Add("[aout]");
+        args.Add("-vn");
+        args.Add("-ac");
+        args.Add(request.AudioChannels.ToString(CultureInfo.InvariantCulture));
+        args.Add("-ar");
+        args.Add(AudioSampleRate.ToString(CultureInfo.InvariantCulture));
+        args.Add("-sample_fmt");
+        args.Add("s32");
+        args.Add("-f");
+        args.Add("s32le");
+        args.Add("pipe:1");
+        return args;
+    }
+
+    private static void AddTransitionInputArguments(
+        List<string> args,
+        string path,
+        TimeSpan startOffset,
+        TimeSpan? duration,
+        string? frameRate)
+    {
+        if (IsImageFile(path))
+        {
+            args.Add("-loop");
+            args.Add("1");
+            args.Add("-framerate");
+            args.Add(NormalizeRateString(frameRate));
+            AddDurationArguments(args, duration);
+            args.Add("-i");
+            args.Add(path);
+            return;
+        }
+
+        AddSeekArguments(args, startOffset);
+        AddDurationArguments(args, duration);
+        args.Add("-i");
+        args.Add(path);
+    }
+
+    private static string BuildTransitionVideoFilter(PlayRequest request, PlaylistTransitionSegment segment)
+    {
+        var rate = NormalizeRateString(request.FrameRate);
+        var scaleFilter = BuildScaleFilter(request.VideoSize);
+        var transition = MapXfadeTransition(segment.Transition);
+        var duration = FormatFilterSeconds(segment.Duration);
+        var offset = FormatFilterSeconds(segment.Offset);
+
+        return string.Join(
+            ";",
+            $"[0:v]setpts=PTS-STARTPTS,fps={rate},{scaleFilter},format=yuv420p[v0]",
+            $"[1:v]setpts=PTS-STARTPTS,fps={rate},{scaleFilter},format=yuv420p[v1]",
+            $"[v0][v1]xfade=transition={transition}:duration={duration}:offset={offset},format=uyvy422[vout]");
+    }
+
+    private static string BuildTransitionAudioFilter(PlaylistTransitionSegment segment)
+    {
+        var duration = FormatFilterSeconds(segment.Duration);
+        return string.Join(
+            ";",
+            "[0:a]asetpts=PTS-STARTPTS,aresample=async=1000:first_pts=0[a0]",
+            "[1:a]asetpts=PTS-STARTPTS,aresample=async=1000:first_pts=0[a1]",
+            $"[a0][a1]acrossfade=d={duration}:c1=tri:c2=tri,aresample=async=1000:first_pts=0[aout]");
+    }
+
+    private static string BuildScaleFilter(string? videoSize)
+    {
+        if (!string.IsNullOrWhiteSpace(videoSize))
+        {
+            var parts = videoSize.Split('x', 'X');
+            if (parts.Length == 2 &&
+                int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var width) &&
+                int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var height) &&
+                width > 0 &&
+                height > 0)
+            {
+                return $"scale={width}:{height}";
+            }
+        }
+
+        return "scale=1920:1080";
+    }
+
+    private static string MapXfadeTransition(string transition)
+    {
+        return transition switch
+        {
+            "Mix" => "fade",
+            "Push" => "coverleft",
+            "Wipe" => "wipeleft",
+            "Slide" => "slideleft",
+            "Fade Black" => "fadeblack",
+            _ => "fade",
+        };
+    }
+
+    private static string FormatFilterSeconds(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero)
+        {
+            value = TimeSpan.Zero;
+        }
+
+        return value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
     private static string BuildVideoFilter(PlayRequest request)
@@ -1229,6 +1406,106 @@ internal sealed class DeckLinkSdkPlayer
             // Best effort while stopping.
         }
     }
+
+    private sealed class ProcessPauseBinding : IDisposable
+    {
+        private readonly object _gate = new();
+        private readonly Process _process;
+        private readonly PlaybackPauseController? _pauseController;
+        private readonly Action<string>? _logLine;
+        private readonly string _name;
+        private bool _isSuspended;
+        private bool _disposed;
+
+        public ProcessPauseBinding(
+            Process process,
+            PlaybackPauseController? pauseController,
+            Action<string>? logLine,
+            string name)
+        {
+            _process = process;
+            _pauseController = pauseController;
+            _logLine = logLine;
+            _name = name;
+
+            if (_pauseController is null)
+            {
+                return;
+            }
+
+            _pauseController.PauseStateChanged += PauseController_PauseStateChanged;
+            if (_pauseController.IsPaused)
+            {
+                SetSuspended(true);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+            }
+
+            if (_pauseController is not null)
+            {
+                _pauseController.PauseStateChanged -= PauseController_PauseStateChanged;
+            }
+        }
+
+        private void PauseController_PauseStateChanged(bool paused)
+        {
+            SetSuspended(paused);
+        }
+
+        private void SetSuspended(bool suspended)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _isSuspended == suspended)
+                {
+                    return;
+                }
+
+                try
+                {
+                    if (_process.HasExited)
+                    {
+                        return;
+                    }
+
+                    var status = suspended
+                        ? NtSuspendProcess(_process.Handle)
+                        : NtResumeProcess(_process.Handle);
+                    if (status != 0)
+                    {
+                        _logLine?.Invoke($"{_name}: pause control returned 0x{status:X8}.");
+                        return;
+                    }
+
+                    _isSuspended = suspended;
+                    _logLine?.Invoke(suspended
+                        ? $"{_name}: ffplay paused."
+                        : $"{_name}: ffplay resumed.");
+                }
+                catch (Exception ex)
+                {
+                    _logLine?.Invoke($"{_name}: ffplay pause control failed: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtSuspendProcess(IntPtr processHandle);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtResumeProcess(IntPtr processHandle);
 
     internal static void ReleaseCom(object? value)
     {

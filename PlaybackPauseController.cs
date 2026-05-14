@@ -6,6 +6,8 @@ internal sealed class PlaybackPauseController
     private TaskCompletionSource? _resumeSignal;
     private bool _preserveVideoOutputOnStop;
 
+    public event Action<bool>? PauseStateChanged;
+
     public bool PreserveVideoOutputOnStop
     {
         get
@@ -37,22 +39,38 @@ internal sealed class PlaybackPauseController
 
     public void Pause()
     {
+        var changed = false;
         lock (_gate)
         {
-            _resumeSignal ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (_resumeSignal is null)
+            {
+                _resumeSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            PauseStateChanged?.Invoke(true);
         }
     }
 
     public void Resume()
     {
         TaskCompletionSource? resumeSignal;
+        var changed = false;
         lock (_gate)
         {
             resumeSignal = _resumeSignal;
             _resumeSignal = null;
+            changed = resumeSignal is not null;
         }
 
         resumeSignal?.TrySetResult();
+        if (changed)
+        {
+            PauseStateChanged?.Invoke(false);
+        }
     }
 
     public async Task WaitIfPausedAsync(CancellationToken cancellationToken)
