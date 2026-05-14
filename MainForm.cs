@@ -53,6 +53,7 @@ internal sealed class MainForm : Form
     private readonly TextBox _mediaRootPathBox = new();
     private readonly TextBox _mediaSearchBox = new();
     private readonly TreeView _mediaTree = new();
+    private readonly DataGridView _mediaGrid = new();
     private readonly ComboBox _deviceBox = new();
     private readonly ComboBox _modeBox = new();
     private readonly TextBox _videoSizeBox = new();
@@ -106,6 +107,7 @@ internal sealed class MainForm : Form
     private CancellationTokenSource? _playbackCancellation;
     private CancellationTokenSource? _mediaSearchCancellation;
     private CancellationTokenSource? _durationProbeCancellation;
+    private CancellationTokenSource? _mediaGridMetadataCancellation;
     private PlaybackPauseController? _playbackPauseController;
     private TaskCompletionSource? _playbackStoppedSignal;
     private NativeFfmpegFrameDecoder? _nativeSeekDecoder;
@@ -133,6 +135,7 @@ internal sealed class MainForm : Form
     private string? _scrubPreviewModeCode;
     private string? _scrubPreviewHelperDisabledPath;
     private string _mediaRootPath = DefaultMediaRootPath;
+    private string? _selectedMediaFolderPath;
     private TimeSpan? _pendingScrubPreviewOffset;
     private bool _isPlaying;
     private bool _isPaused;
@@ -206,6 +209,7 @@ internal sealed class MainForm : Form
             _playbackCancellation?.Cancel();
             _mediaSearchCancellation?.Cancel();
             _durationProbeCancellation?.Cancel();
+            _mediaGridMetadataCancellation?.Cancel();
             _scrubSeekTimer.Stop();
             _cpuUsageTimer.Stop();
             DisposeCpuUsageSampling();
@@ -537,7 +541,7 @@ internal sealed class MainForm : Form
         {
             _mediaSearchBox.Clear();
             _mediaSearchTimer.Stop();
-            LoadMediaTree();
+            ShowSelectedFolderFiles();
         };
         content.Controls.Add(BuildInputRow("Search", _mediaSearchBox, _clearMediaSearchButton), 0, 0);
 
@@ -560,10 +564,32 @@ internal sealed class MainForm : Form
         content.Controls.Add(BuildLibraryRow(), 0, 1);
 
         StyleMediaTree();
-        content.Controls.Add(_mediaTree, 0, 2);
+        StyleMediaGrid();
+        content.Controls.Add(BuildMediaBrowserPanel(panel.BackColor), 0, 2);
         panel.Controls.Add(content);
 
         return panel;
+    }
+
+    private Control BuildMediaBrowserPanel(Color backColor)
+    {
+        var browser = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = backColor,
+        };
+        browser.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 164));
+        browser.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        browser.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        _mediaTree.Margin = new Padding(0, 0, 8, 0);
+        _mediaGrid.Margin = new Padding(0);
+
+        browser.Controls.Add(_mediaTree, 0, 0);
+        browser.Controls.Add(_mediaGrid, 1, 0);
+        return browser;
     }
 
     private Control BuildOutputPanel()
@@ -1368,21 +1394,81 @@ internal sealed class MainForm : Form
         _mediaTree.ShowNodeToolTips = true;
         _mediaTree.BeforeExpand -= MediaTree_BeforeExpand;
         _mediaTree.AfterSelect -= MediaTree_AfterSelect;
-        _mediaTree.MouseDoubleClick -= MediaTree_MouseDoubleClick;
         _mediaTree.BeforeExpand += MediaTree_BeforeExpand;
         _mediaTree.AfterSelect += MediaTree_AfterSelect;
-        _mediaTree.MouseDoubleClick += MediaTree_MouseDoubleClick;
+    }
+
+    private void StyleMediaGrid()
+    {
+        _mediaGrid.Dock = DockStyle.Fill;
+        _mediaGrid.BackgroundColor = Color.FromArgb(13, 16, 19);
+        _mediaGrid.GridColor = Color.FromArgb(54, 61, 68);
+        _mediaGrid.BorderStyle = BorderStyle.FixedSingle;
+        _mediaGrid.AllowUserToAddRows = false;
+        _mediaGrid.AllowUserToDeleteRows = false;
+        _mediaGrid.AllowUserToResizeRows = false;
+        _mediaGrid.ReadOnly = true;
+        _mediaGrid.MultiSelect = false;
+        _mediaGrid.RowHeadersVisible = false;
+        _mediaGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _mediaGrid.AutoGenerateColumns = false;
+        _mediaGrid.EnableHeadersVisualStyles = false;
+        _mediaGrid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+        _mediaGrid.ColumnHeadersHeight = 25;
+        _mediaGrid.RowTemplate.Height = 24;
+        _mediaGrid.Font = new Font("Segoe UI", 8.5F, FontStyle.Regular, GraphicsUnit.Point);
+        _mediaGrid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(38, 44, 50);
+        _mediaGrid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(236, 241, 244);
+        _mediaGrid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Color.FromArgb(38, 44, 50);
+        _mediaGrid.ColumnHeadersDefaultCellStyle.SelectionForeColor = Color.FromArgb(236, 241, 244);
+        _mediaGrid.DefaultCellStyle.BackColor = Color.FromArgb(17, 20, 24);
+        _mediaGrid.DefaultCellStyle.ForeColor = Color.FromArgb(226, 234, 238);
+        _mediaGrid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(32, 116, 190);
+        _mediaGrid.DefaultCellStyle.SelectionForeColor = Color.White;
+        _mediaGrid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(29, 34, 39);
+
+        _mediaGrid.Columns.Clear();
+        _mediaGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "FileName",
+            HeaderText = "File_Name",
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            FillWeight = 68,
+        });
+        _mediaGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Duration",
+            HeaderText = "Duration",
+            Width = 72,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _mediaGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Size",
+            HeaderText = "Size",
+            Width = 72,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+
+        _mediaGrid.SelectionChanged -= MediaGrid_SelectionChanged;
+        _mediaGrid.CellDoubleClick -= MediaGrid_CellDoubleClick;
+        _mediaGrid.KeyDown -= MediaGrid_KeyDown;
+        _mediaGrid.SelectionChanged += MediaGrid_SelectionChanged;
+        _mediaGrid.CellDoubleClick += MediaGrid_CellDoubleClick;
+        _mediaGrid.KeyDown += MediaGrid_KeyDown;
     }
 
     private void LoadMediaTree()
     {
         _mediaSearchCancellation?.Cancel();
+        _mediaGridMetadataCancellation?.Cancel();
         var mediaRootPath = _mediaRootPath;
         _mediaRootPathBox.Text = mediaRootPath;
         _mediaTree.BeginUpdate();
         try
         {
             _mediaTree.Nodes.Clear();
+            ClearMediaGrid();
             if (!Directory.Exists(mediaRootPath))
             {
                 _mediaTree.Nodes.Add(new TreeNode($"{mediaRootPath} not found"));
@@ -1394,12 +1480,13 @@ internal sealed class MainForm : Form
             _mediaTree.Nodes.Add(root);
             LoadDirectoryChildren(root);
             root.Expand();
-            SetStatus("Media tree ready", Color.FromArgb(130, 210, 164));
+            _mediaTree.SelectedNode = root;
+            ShowFolderFiles(mediaRootPath);
         }
         catch (Exception ex)
         {
-            AppendLog($"Media tree error: {ex.Message}");
-            SetStatus("Media tree error", Color.FromArgb(229, 113, 105));
+            AppendLog($"Media browser error: {ex.Message}");
+            SetStatus("Media browser error", Color.FromArgb(229, 113, 105));
         }
         finally
         {
@@ -1448,7 +1535,7 @@ internal sealed class MainForm : Form
 
         if (string.IsNullOrWhiteSpace(searchText))
         {
-            LoadMediaTree();
+            ShowSelectedFolderFiles();
             return;
         }
 
@@ -1490,34 +1577,10 @@ internal sealed class MainForm : Form
 
     private void ShowMediaSearchResults(string searchText, IReadOnlyList<string> results)
     {
-        _mediaTree.BeginUpdate();
-        try
-        {
-            _mediaTree.Nodes.Clear();
-            var root = new TreeNode($"Search: {searchText} ({results.Count})");
-
-            if (results.Count == 0)
-            {
-                root.Nodes.Add(new TreeNode("No matches"));
-            }
-            else
-            {
-                foreach (var file in results)
-                {
-                    root.Nodes.Add(CreateFileNode(file, GetMediaDisplayPath(file)));
-                }
-            }
-
-            _mediaTree.Nodes.Add(root);
-            root.Expand();
-            SetStatus($"{results.Count} media match(es)", results.Count > 0
-                ? Color.FromArgb(130, 210, 164)
-                : Color.FromArgb(232, 181, 105));
-        }
-        finally
-        {
-            _mediaTree.EndUpdate();
-        }
+        ShowMediaFiles(results, $"No matches for {searchText}");
+        SetStatus($"{results.Count} media match(es)", results.Count > 0
+            ? Color.FromArgb(130, 210, 164)
+            : Color.FromArgb(232, 181, 105));
     }
 
     private void MediaTree_BeforeExpand(object? sender, TreeViewCancelEventArgs e)
@@ -1531,66 +1594,155 @@ internal sealed class MainForm : Form
 
     private void MediaTree_AfterSelect(object? sender, TreeViewEventArgs e)
     {
-        _ = SelectMediaNode(e.Node);
-    }
-
-    private async void MediaTree_MouseDoubleClick(object? sender, MouseEventArgs e)
-    {
-        var node = GetTreeNodeAtPoint(e.Location);
-        if (node is not null)
+        if (e.Node?.Tag is string path && Directory.Exists(path))
         {
-            _mediaTree.SelectedNode = node;
-            await PlaySelectedMediaNodeAsync(node);
+            ShowFolderFiles(path);
         }
     }
 
-    private TreeNode? GetTreeNodeAtPoint(Point location)
+    private void ShowSelectedFolderFiles()
     {
-        var hitNode = _mediaTree.HitTest(location).Node;
-        if (hitNode is not null)
+        var folderPath = _mediaTree.SelectedNode?.Tag as string ?? _selectedMediaFolderPath ?? _mediaRootPath;
+        if (Directory.Exists(folderPath))
         {
-            return hitNode;
+            ShowFolderFiles(folderPath);
+            return;
         }
 
-        foreach (TreeNode node in _mediaTree.Nodes)
+        ClearMediaGrid();
+    }
+
+    private void ShowFolderFiles(string folderPath)
+    {
+        _selectedMediaFolderPath = folderPath;
+        if (!Directory.Exists(folderPath))
         {
-            var rowNode = FindVisibleNodeAtY(node, location.Y);
-            if (rowNode is not null)
+            ClearMediaGrid();
+            SetStatus("Media folder missing", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        try
+        {
+            var files = Directory
+                .EnumerateFiles(folderPath)
+                .Where(IsSupportedMediaFile)
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            ShowMediaFiles(files, "No media files in this folder");
+            SetStatus($"{files.Count} file(s) in {Path.GetFileName(folderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}", files.Count > 0
+                ? Color.FromArgb(130, 210, 164)
+                : Color.FromArgb(232, 181, 105));
+        }
+        catch (UnauthorizedAccessException)
+        {
+            ClearMediaGrid();
+            SetStatus("Folder access denied", Color.FromArgb(232, 181, 105));
+        }
+        catch (IOException ex)
+        {
+            ClearMediaGrid();
+            AppendLog($"Folder load error: {ex.Message}");
+            SetStatus("Folder load error", Color.FromArgb(229, 113, 105));
+        }
+    }
+
+    private void ShowMediaFiles(IReadOnlyList<string> files, string emptyMessage)
+    {
+        _mediaGridMetadataCancellation?.Cancel();
+        _mediaGrid.Rows.Clear();
+
+        if (files.Count == 0)
+        {
+            var emptyRow = _mediaGrid.Rows[_mediaGrid.Rows.Add(emptyMessage, string.Empty, string.Empty)];
+            emptyRow.DefaultCellStyle.ForeColor = Color.FromArgb(166, 179, 190);
+            return;
+        }
+
+        _mediaGrid.SuspendLayout();
+        try
+        {
+            foreach (var file in files)
             {
-                return rowNode;
+                var durationText = IsImageFile(file) ? "Still" : "--";
+                var rowIndex = _mediaGrid.Rows.Add(GetMediaDisplayPath(file), durationText, GetFileSizeText(file));
+                var row = _mediaGrid.Rows[rowIndex];
+                row.Tag = file;
+                row.Cells[0].ToolTipText = file;
             }
+        }
+        finally
+        {
+            _mediaGrid.ResumeLayout();
+        }
+
+        if (_mediaGrid.Rows.Count > 0)
+        {
+            _mediaGrid.CurrentCell = _mediaGrid.Rows[0].Cells[0];
+            _mediaGrid.Rows[0].Selected = true;
+            if (_mediaGrid.Rows[0].Tag is string path)
+            {
+                _ = SelectMediaPath(path);
+            }
+        }
+
+        StartMediaGridMetadataProbe(files);
+    }
+
+    private void ClearMediaGrid()
+    {
+        _mediaGridMetadataCancellation?.Cancel();
+        _mediaGrid.Rows.Clear();
+    }
+
+    private void MediaGrid_SelectionChanged(object? sender, EventArgs e)
+    {
+        var path = GetSelectedMediaGridPath();
+        if (path is not null)
+        {
+            _ = SelectMediaPath(path);
+        }
+    }
+
+    private async void MediaGrid_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex >= 0)
+        {
+            await PlaySelectedMediaGridAsync();
+        }
+    }
+
+    private async void MediaGrid_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Enter)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            await PlaySelectedMediaGridAsync();
+        }
+    }
+
+    private string? GetSelectedMediaGridPath()
+    {
+        if (_mediaGrid.CurrentRow?.Tag is string currentPath && File.Exists(currentPath))
+        {
+            return currentPath;
+        }
+
+        if (_mediaGrid.SelectedRows.Count > 0 &&
+            _mediaGrid.SelectedRows[0].Tag is string selectedPath &&
+            File.Exists(selectedPath))
+        {
+            return selectedPath;
         }
 
         return null;
     }
 
-    private static TreeNode? FindVisibleNodeAtY(TreeNode node, int y)
+    private bool SelectMediaPath(string path)
     {
-        if (node.Bounds.Top <= y && y <= node.Bounds.Bottom)
-        {
-            return node;
-        }
-
-        if (!node.IsExpanded)
-        {
-            return null;
-        }
-
-        foreach (TreeNode child in node.Nodes)
-        {
-            var match = FindVisibleNodeAtY(child, y);
-            if (match is not null)
-            {
-                return match;
-            }
-        }
-
-        return null;
-    }
-
-    private bool SelectMediaNode(TreeNode? node)
-    {
-        if (node?.Tag is not string path || !File.Exists(path))
+        if (!File.Exists(path))
         {
             return false;
         }
@@ -1605,6 +1757,205 @@ internal sealed class MainForm : Form
         _inputPathBox.Text = path;
         SetStatus(_isPlaying ? $"Next: {Path.GetFileName(path)}" : $"Selected {Path.GetFileName(path)}", Color.FromArgb(130, 210, 164));
         return true;
+    }
+
+    private async void StartMediaGridMetadataProbe(IReadOnlyList<string> files)
+    {
+        _mediaGridMetadataCancellation?.Cancel();
+        if (files.Count == 0)
+        {
+            return;
+        }
+
+        var ffprobePath = GetFfprobePath();
+        if (!File.Exists(ffprobePath))
+        {
+            AppendLog($"Media grid metadata skipped: ffprobe.exe not found next to {Path.GetFileName(GetFfmpegPath())}.");
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        _mediaGridMetadataCancellation = cancellation;
+
+        try
+        {
+            foreach (var file in files)
+            {
+                cancellation.Token.ThrowIfCancellationRequested();
+                if (!File.Exists(file))
+                {
+                    continue;
+                }
+
+                var metadata = await ProbeMediaGridItemAsync(ffprobePath, file, cancellation.Token);
+                UpdateMediaGridMetadata(file, metadata.Duration, metadata.Size, cancellation.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when the operator picks another folder or search text.
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Media grid metadata stopped: {ex.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(_mediaGridMetadataCancellation, cancellation))
+            {
+                _mediaGridMetadataCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private async Task<(string Duration, string Size)> ProbeMediaGridItemAsync(
+        string ffprobePath,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        var durationText = IsImageFile(path) ? "Still" : "--";
+        var sizeText = GetFileSizeText(path);
+
+        var result = await _deckLink.RunProcessAsync(
+            ffprobePath,
+            [
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height:format=duration",
+                "-of",
+                "default=noprint_wrappers=1",
+                path,
+            ],
+            cancellationToken: cancellationToken);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (result.ExitCode != 0)
+        {
+            return (durationText, sizeText);
+        }
+
+        int? width = null;
+        int? height = null;
+        double? seconds = null;
+        foreach (var rawLine in result.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = rawLine.IndexOf('=');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            var key = rawLine[..separator].Trim();
+            var value = rawLine[(separator + 1)..].Trim();
+            if (string.Equals(key, "width", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedWidth) &&
+                parsedWidth > 0)
+            {
+                width = parsedWidth;
+            }
+            else if (string.Equals(key, "height", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedHeight) &&
+                parsedHeight > 0)
+            {
+                height = parsedHeight;
+            }
+            else if (string.Equals(key, "duration", StringComparison.OrdinalIgnoreCase) &&
+                double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedSeconds) &&
+                parsedSeconds > 0 &&
+                !double.IsNaN(parsedSeconds) &&
+                !double.IsInfinity(parsedSeconds))
+            {
+                seconds = parsedSeconds;
+            }
+        }
+
+        if (!IsImageFile(path) && seconds.HasValue)
+        {
+            durationText = FormatGridDuration(TimeSpan.FromSeconds(seconds.Value));
+        }
+
+        if (width.HasValue && height.HasValue)
+        {
+            sizeText = $"{width.Value}x{height.Value}";
+        }
+
+        return (durationText, sizeText);
+    }
+
+    private void UpdateMediaGridMetadata(string path, string duration, string size, CancellationToken cancellationToken)
+    {
+        if (IsDisposed || cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(() => UpdateMediaGridMetadata(path, duration, size, cancellationToken));
+            }
+            catch
+            {
+                // The form may be closing while metadata probing is being cancelled.
+            }
+
+            return;
+        }
+
+        foreach (DataGridViewRow row in _mediaGrid.Rows)
+        {
+            if (row.Tag is string rowPath &&
+                string.Equals(rowPath, path, StringComparison.OrdinalIgnoreCase))
+            {
+                row.Cells["Duration"].Value = duration;
+                row.Cells["Size"].Value = size;
+                return;
+            }
+        }
+    }
+
+    private static string FormatGridDuration(TimeSpan duration)
+    {
+        if (duration < TimeSpan.Zero)
+        {
+            duration = TimeSpan.Zero;
+        }
+
+        return $"{(int)duration.TotalHours:00}:{duration.Minutes:00}:{duration.Seconds:00}";
+    }
+
+    private static string GetFileSizeText(string path)
+    {
+        try
+        {
+            var length = new FileInfo(path).Length;
+            if (length >= 1024L * 1024 * 1024)
+            {
+                return $"{length / (1024d * 1024 * 1024):0.##} GB";
+            }
+
+            if (length >= 1024L * 1024)
+            {
+                return $"{length / (1024d * 1024):0.##} MB";
+            }
+
+            if (length >= 1024)
+            {
+                return $"{length / 1024d:0.##} KB";
+            }
+
+            return $"{length} B";
+        }
+        catch
+        {
+            return "--";
+        }
     }
 
     private void ScheduleDurationProbe()
@@ -3038,9 +3389,10 @@ internal sealed class MainForm : Form
         return $"{value.Minutes:00}:{value.Seconds:00}";
     }
 
-    private async Task PlaySelectedMediaNodeAsync(TreeNode? node)
+    private async Task PlaySelectedMediaGridAsync()
     {
-        if (!SelectMediaNode(node))
+        var path = GetSelectedMediaGridPath();
+        if (path is null || !SelectMediaPath(path))
         {
             if (!_isPlaying && File.Exists(_inputPathBox.Text.Trim()))
             {
@@ -3094,11 +3446,6 @@ internal sealed class MainForm : Form
         return node;
     }
 
-    private static TreeNode CreateFileNode(string path, string? text = null)
-    {
-        return new TreeNode(text ?? Path.GetFileName(path)) { Tag = path, ToolTipText = path };
-    }
-
     private static void LoadDirectoryChildren(TreeNode node)
     {
         if (node.Tag is not string path || !Directory.Exists(path) || !IsPlaceholderOrEmpty(node))
@@ -3112,11 +3459,6 @@ internal sealed class MainForm : Form
             foreach (var directory in Directory.EnumerateDirectories(path).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
             {
                 node.Nodes.Add(CreateDirectoryNode(directory, Path.GetFileName(directory)));
-            }
-
-            foreach (var file in Directory.EnumerateFiles(path).Where(IsSupportedMediaFile).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
-            {
-                node.Nodes.Add(CreateFileNode(file));
             }
         }
         catch (UnauthorizedAccessException)
@@ -3861,6 +4203,7 @@ internal sealed class MainForm : Form
         _previewOnlyCheckBox.Enabled = !isPlaying;
         _pcAudioCheckBox.Enabled = !isPlaying;
         _mediaTree.Enabled = true;
+        _mediaGrid.Enabled = true;
         if (!isPlaying)
         {
             _pauseResumeButton.Text = "Pause";
@@ -3884,6 +4227,7 @@ internal sealed class MainForm : Form
         _previewOnlyCheckBox.Enabled = enabled && !_isPlaying;
         _pcAudioCheckBox.Enabled = enabled && !_isPlaying;
         _mediaTree.Enabled = enabled;
+        _mediaGrid.Enabled = enabled;
         _stopButton.Enabled = _isPlaying;
     }
 
