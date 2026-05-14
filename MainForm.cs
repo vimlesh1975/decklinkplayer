@@ -14,6 +14,11 @@ internal sealed class MainForm : Form
     private const string DefaultDeckLinkModeCode = "Hi50";
     private const string SettingsFolderName = "DeckLinkPlayer";
     private const string SettingsFileName = "settings.txt";
+    private const string PlaylistStatusReady = "READY";
+    private const string PlaylistStatusNext = "NEXT";
+    private const string PlaylistStatusPlaying = "PLAYING";
+    private const string PlaylistStatusPlayed = "PLAYED";
+    private const string PlaylistStatusMissing = "MISSING";
     private const uint PdhFormatDouble = 0x00000200;
     private const int PdhSuccess = 0;
     private const double CpuSmoothingFactor = 0.35;
@@ -54,6 +59,13 @@ internal sealed class MainForm : Form
     private readonly TextBox _mediaSearchBox = new();
     private readonly TreeView _mediaTree = new();
     private readonly DataGridView _mediaGrid = new();
+    private readonly DataGridView _playlistGrid = new();
+    private readonly Button _addToPlaylistButton = new();
+    private readonly Button _removePlaylistItemButton = new();
+    private readonly Button _movePlaylistItemUpButton = new();
+    private readonly Button _movePlaylistItemDownButton = new();
+    private readonly Button _playPlaylistItemButton = new();
+    private readonly Button _clearPlaylistButton = new();
     private readonly ComboBox _deviceBox = new();
     private readonly ComboBox _modeBox = new();
     private readonly TextBox _videoSizeBox = new();
@@ -116,6 +128,7 @@ internal sealed class MainForm : Form
     private PreviewFrameHelperClient? _scrubPreviewHelper;
     private CancellationTokenSource? _scrubPreviewDecodeCancellation;
     private Task? _scrubPreviewStartTask;
+    private readonly List<PlaylistItem> _playlistItems = new();
     private TimeSpan? _selectedMediaDuration;
     private TimeSpan? _playbackDuration;
     private DateTime? _playbackStartedAt;
@@ -136,6 +149,7 @@ internal sealed class MainForm : Form
     private string? _scrubPreviewHelperDisabledPath;
     private string _mediaRootPath = DefaultMediaRootPath;
     private string? _selectedMediaFolderPath;
+    private int? _playlistPlayingIndex;
     private TimeSpan? _pendingScrubPreviewOffset;
     private bool _isPlaying;
     private bool _isPaused;
@@ -524,12 +538,18 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 5,
             BackColor = panel.BackColor,
         };
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 154));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        StylePlaylistGrid();
+        content.Controls.Add(_playlistGrid, 0, 0);
+        content.Controls.Add(BuildPlaylistControlRow(), 0, 1);
 
         _mediaSearchBox.PlaceholderText = "Search media";
         _mediaSearchBox.TextChanged += (_, _) => ScheduleMediaSearch();
@@ -543,7 +563,7 @@ internal sealed class MainForm : Form
             _mediaSearchTimer.Stop();
             ShowSelectedFolderFiles();
         };
-        content.Controls.Add(BuildInputRow("Search", _mediaSearchBox, _clearMediaSearchButton), 0, 0);
+        content.Controls.Add(BuildInputRow("Search", _mediaSearchBox, _clearMediaSearchButton), 0, 2);
 
         _refreshMediaButton.Text = "Refresh";
         StyleButton(_refreshMediaButton, Color.FromArgb(52, 67, 82));
@@ -561,11 +581,11 @@ internal sealed class MainForm : Form
         _browseMediaRootButton.Text = "Browse";
         StyleButton(_browseMediaRootButton, Color.FromArgb(63, 96, 135));
         _browseMediaRootButton.Click += (_, _) => BrowseMediaRoot();
-        content.Controls.Add(BuildLibraryRow(), 0, 1);
+        content.Controls.Add(BuildLibraryRow(), 0, 3);
 
         StyleMediaTree();
         StyleMediaGrid();
-        content.Controls.Add(BuildMediaBrowserPanel(panel.BackColor), 0, 2);
+        content.Controls.Add(BuildMediaBrowserPanel(panel.BackColor), 0, 4);
         panel.Controls.Add(content);
 
         return panel;
@@ -590,6 +610,57 @@ internal sealed class MainForm : Form
         browser.Controls.Add(_mediaTree, 0, 0);
         browser.Controls.Add(_mediaGrid, 1, 0);
         return browser;
+    }
+
+    private Control BuildPlaylistControlRow()
+    {
+        var row = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(0, 4, 0, 0),
+            BackColor = Color.FromArgb(30, 35, 40),
+        };
+
+        ConfigurePlaylistButton(_addToPlaylistButton, "Add", Color.FromArgb(39, 125, 87), AddSelectedMediaToPlaylist);
+        ConfigurePlaylistButton(_playPlaylistItemButton, "Play", Color.FromArgb(63, 96, 135), async () => await PlaySelectedPlaylistItemAsync());
+        ConfigurePlaylistButton(_movePlaylistItemUpButton, "Up", Color.FromArgb(52, 67, 82), MoveSelectedPlaylistItemUp);
+        ConfigurePlaylistButton(_movePlaylistItemDownButton, "Down", Color.FromArgb(52, 67, 82), MoveSelectedPlaylistItemDown);
+        ConfigurePlaylistButton(_removePlaylistItemButton, "Remove", Color.FromArgb(149, 64, 58), RemoveSelectedPlaylistItem);
+        ConfigurePlaylistButton(_clearPlaylistButton, "Clear", Color.FromArgb(52, 67, 82), ClearPlaylist);
+
+        row.Controls.AddRange(
+            [
+                _addToPlaylistButton,
+                _playPlaylistItemButton,
+                _movePlaylistItemUpButton,
+                _movePlaylistItemDownButton,
+                _removePlaylistItemButton,
+                _clearPlaylistButton,
+            ]);
+
+        return row;
+    }
+
+    private static void ConfigurePlaylistButton(Button button, string text, Color color, Action action)
+    {
+        button.Text = text;
+        button.Width = text.Length > 5 ? 64 : 52;
+        button.Height = 28;
+        button.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(button, color);
+        button.Click += (_, _) => action();
+    }
+
+    private static void ConfigurePlaylistButton(Button button, string text, Color color, Func<Task> action)
+    {
+        button.Text = text;
+        button.Width = 52;
+        button.Height = 28;
+        button.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(button, color);
+        button.Click += async (_, _) => await action();
     }
 
     private Control BuildOutputPanel()
@@ -1396,6 +1467,543 @@ internal sealed class MainForm : Form
         _mediaTree.AfterSelect -= MediaTree_AfterSelect;
         _mediaTree.BeforeExpand += MediaTree_BeforeExpand;
         _mediaTree.AfterSelect += MediaTree_AfterSelect;
+    }
+
+    private void StylePlaylistGrid()
+    {
+        _playlistGrid.Dock = DockStyle.Fill;
+        _playlistGrid.BackgroundColor = Color.FromArgb(13, 16, 19);
+        _playlistGrid.GridColor = Color.FromArgb(54, 61, 68);
+        _playlistGrid.BorderStyle = BorderStyle.FixedSingle;
+        _playlistGrid.AllowUserToAddRows = false;
+        _playlistGrid.AllowUserToDeleteRows = false;
+        _playlistGrid.AllowUserToResizeRows = false;
+        _playlistGrid.ReadOnly = true;
+        _playlistGrid.MultiSelect = false;
+        _playlistGrid.RowHeadersVisible = false;
+        _playlistGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _playlistGrid.AutoGenerateColumns = false;
+        _playlistGrid.EnableHeadersVisualStyles = false;
+        _playlistGrid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+        _playlistGrid.ColumnHeadersHeight = 25;
+        _playlistGrid.RowTemplate.Height = 24;
+        _playlistGrid.Font = new Font("Segoe UI", 8.2F, FontStyle.Regular, GraphicsUnit.Point);
+        _playlistGrid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(38, 44, 50);
+        _playlistGrid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(236, 241, 244);
+        _playlistGrid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Color.FromArgb(38, 44, 50);
+        _playlistGrid.ColumnHeadersDefaultCellStyle.SelectionForeColor = Color.FromArgb(236, 241, 244);
+        _playlistGrid.DefaultCellStyle.BackColor = Color.FromArgb(17, 20, 24);
+        _playlistGrid.DefaultCellStyle.ForeColor = Color.FromArgb(226, 234, 238);
+        _playlistGrid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(32, 116, 190);
+        _playlistGrid.DefaultCellStyle.SelectionForeColor = Color.White;
+        _playlistGrid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(29, 34, 39);
+
+        _playlistGrid.Columns.Clear();
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Number",
+            HeaderText = "#",
+            Width = 28,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Status",
+            HeaderText = "Status",
+            Width = 58,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Clip",
+            HeaderText = "Clip",
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            FillWeight = 64,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "In",
+            HeaderText = "In",
+            Width = 58,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Out",
+            HeaderText = "Out",
+            Width = 58,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Duration",
+            HeaderText = "Dur",
+            Width = 58,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Start",
+            HeaderText = "Start",
+            Width = 58,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "End",
+            HeaderText = "End",
+            Width = 58,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "FullPath",
+            HeaderText = "FullPath",
+            Visible = false,
+        });
+
+        _playlistGrid.SelectionChanged -= PlaylistGrid_SelectionChanged;
+        _playlistGrid.CellDoubleClick -= PlaylistGrid_CellDoubleClick;
+        _playlistGrid.KeyDown -= PlaylistGrid_KeyDown;
+        _playlistGrid.SelectionChanged += PlaylistGrid_SelectionChanged;
+        _playlistGrid.CellDoubleClick += PlaylistGrid_CellDoubleClick;
+        _playlistGrid.KeyDown += PlaylistGrid_KeyDown;
+        RefreshPlaylistGrid();
+    }
+
+    private void PlaylistGrid_SelectionChanged(object? sender, EventArgs e)
+    {
+        UpdatePlaylistButtons();
+    }
+
+    private async void PlaylistGrid_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex >= 0)
+        {
+            await PlaySelectedPlaylistItemAsync();
+        }
+    }
+
+    private async void PlaylistGrid_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Enter)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            await PlaySelectedPlaylistItemAsync();
+        }
+        else if (e.KeyCode == Keys.Delete)
+        {
+            e.Handled = true;
+            RemoveSelectedPlaylistItem();
+        }
+    }
+
+    private void AddSelectedMediaToPlaylist()
+    {
+        var path = GetSelectedMediaGridPath();
+        if (path is null)
+        {
+            path = _inputPathBox.Text.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            SetStatus("Choose a media file first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var duration = GetKnownMediaDuration(path);
+        var isStill = IsImageFile(path);
+        var item = new PlaylistItem(path)
+        {
+            SourceDuration = isStill ? null : duration,
+            TcIn = TimeSpan.Zero,
+            TcOut = isStill ? null : duration,
+            Status = PlaylistStatusReady,
+        };
+
+        var insertIndex = GetSelectedPlaylistIndex();
+        if (insertIndex.HasValue && insertIndex.Value >= 0 && insertIndex.Value < _playlistItems.Count)
+        {
+            _playlistItems.Insert(insertIndex.Value + 1, item);
+            RefreshPlaylistGrid(insertIndex.Value + 1);
+        }
+        else
+        {
+            _playlistItems.Add(item);
+            RefreshPlaylistGrid(_playlistItems.Count - 1);
+        }
+
+        SetStatus($"Added {Path.GetFileName(path)} to playlist", Color.FromArgb(130, 210, 164));
+    }
+
+    private void RemoveSelectedPlaylistItem()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue)
+        {
+            return;
+        }
+
+        if (_playlistPlayingIndex == index.Value)
+        {
+            SetStatus("Stop playback before removing the playing row", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        _playlistItems.RemoveAt(index.Value);
+        if (_playlistPlayingIndex.HasValue && _playlistPlayingIndex.Value > index.Value)
+        {
+            _playlistPlayingIndex--;
+        }
+
+        RefreshPlaylistGrid(Math.Min(index.Value, _playlistItems.Count - 1));
+    }
+
+    private void ClearPlaylist()
+    {
+        if (_playlistPlayingIndex.HasValue)
+        {
+            SetStatus("Stop playback before clearing playlist", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        _playlistItems.Clear();
+        _playlistPlayingIndex = null;
+        RefreshPlaylistGrid();
+    }
+
+    private void MoveSelectedPlaylistItemUp()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue || index.Value <= 0)
+        {
+            return;
+        }
+
+        MovePlaylistItem(index.Value, index.Value - 1);
+    }
+
+    private void MoveSelectedPlaylistItemDown()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue || index.Value >= _playlistItems.Count - 1)
+        {
+            return;
+        }
+
+        MovePlaylistItem(index.Value, index.Value + 1);
+    }
+
+    private void MovePlaylistItem(int fromIndex, int toIndex)
+    {
+        if (_playlistPlayingIndex == fromIndex || _playlistPlayingIndex == toIndex)
+        {
+            SetStatus("Stop playback before moving the playing row", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var item = _playlistItems[fromIndex];
+        _playlistItems.RemoveAt(fromIndex);
+        _playlistItems.Insert(toIndex, item);
+        RefreshPlaylistGrid(toIndex);
+    }
+
+    private async Task PlaySelectedPlaylistItemAsync()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue || index.Value < 0 || index.Value >= _playlistItems.Count)
+        {
+            SetStatus("Choose a playlist row first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await PlayPlaylistItemAsync(index.Value);
+    }
+
+    private async Task PlayPlaylistItemAsync(int index)
+    {
+        if (index < 0 || index >= _playlistItems.Count)
+        {
+            return;
+        }
+
+        var item = _playlistItems[index].Snapshot();
+        if (!File.Exists(item.FullPath))
+        {
+            _playlistItems[index].Status = PlaylistStatusMissing;
+            RefreshPlaylistGrid(index);
+            SetStatus("Playlist file missing", Color.FromArgb(229, 113, 105));
+            return;
+        }
+
+        if (_isPlaying)
+        {
+            _switchingPlayback = true;
+            try
+            {
+                var stoppedTask = _playbackStoppedSignal?.Task;
+                PreserveVideoOutputForReplacement();
+                StopPlayback();
+                if (stoppedTask is not null)
+                {
+                    await stoppedTask;
+                }
+            }
+            finally
+            {
+                _switchingPlayback = false;
+            }
+        }
+
+        SelectMediaPath(item.FullPath);
+        _selectedStartOffset = item.TcIn;
+        MarkPlaylistItemPlaying(index);
+        AppendLog($"Starting playlist row {index + 1}: {Path.GetFileName(item.FullPath)}");
+        await StartPlaybackAsync(dryRun: false, startOffset: item.TcIn);
+    }
+
+    private void MarkPlaylistItemPlaying(int index)
+    {
+        _playlistPlayingIndex = index;
+        for (var i = 0; i < _playlistItems.Count; i++)
+        {
+            if (!File.Exists(_playlistItems[i].FullPath))
+            {
+                _playlistItems[i].Status = PlaylistStatusMissing;
+            }
+            else if (i == index)
+            {
+                _playlistItems[i].Status = PlaylistStatusPlaying;
+            }
+            else if (_playlistItems[i].Status == PlaylistStatusPlaying || _playlistItems[i].Status == PlaylistStatusNext)
+            {
+                _playlistItems[i].Status = PlaylistStatusReady;
+            }
+        }
+
+        var next = FindNextPlayablePlaylistIndex(index + 1);
+        if (next.HasValue)
+        {
+            _playlistItems[next.Value].Status = PlaylistStatusNext;
+        }
+
+        RefreshPlaylistGrid(index);
+    }
+
+    private void CompletePlaylistPlayback(bool completedNormally)
+    {
+        if (!_playlistPlayingIndex.HasValue)
+        {
+            return;
+        }
+
+        var index = _playlistPlayingIndex.Value;
+        _playlistPlayingIndex = null;
+        if (index >= 0 && index < _playlistItems.Count)
+        {
+            _playlistItems[index].Status = completedNormally ? PlaylistStatusPlayed : PlaylistStatusReady;
+            if (!completedNormally)
+            {
+                var next = FindNextPlayablePlaylistIndex(index + 1);
+                if (next.HasValue)
+                {
+                    _playlistItems[next.Value].Status = PlaylistStatusReady;
+                }
+            }
+        }
+
+        RefreshPlaylistGrid(index);
+    }
+
+    private int? FindNextPlayablePlaylistIndex(int startIndex)
+    {
+        for (var i = Math.Max(0, startIndex); i < _playlistItems.Count; i++)
+        {
+            var item = _playlistItems[i];
+            if (File.Exists(item.FullPath) && item.Status != PlaylistStatusPlayed)
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+
+    private void RefreshPlaylistGrid(int? selectedIndex = null)
+    {
+        _playlistGrid.Rows.Clear();
+        NormalizePlaylistStatuses();
+
+        var timelineKnown = true;
+        var cursor = TimeSpan.Zero;
+        for (var i = 0; i < _playlistItems.Count; i++)
+        {
+            var item = _playlistItems[i];
+            var duration = item.PlayDuration;
+            var startText = timelineKnown ? FormatGridDuration(cursor) : "--";
+            var endText = timelineKnown && duration.HasValue ? FormatGridDuration(cursor + duration.Value) : "--";
+            var rowIndex = _playlistGrid.Rows.Add(
+                (i + 1).ToString(CultureInfo.InvariantCulture),
+                item.Status,
+                GetMediaDisplayPath(item.FullPath),
+                FormatPlaylistTime(item.TcIn),
+                item.TcOut.HasValue ? FormatPlaylistTime(item.TcOut.Value) : "--",
+                duration.HasValue ? FormatPlaylistTime(duration.Value) : "--",
+                startText,
+                endText,
+                item.FullPath);
+
+            var row = _playlistGrid.Rows[rowIndex];
+            row.Tag = item;
+            row.Cells["Clip"].ToolTipText = item.FullPath;
+            ApplyPlaylistRowStyle(row, item.Status);
+
+            if (timelineKnown && duration.HasValue)
+            {
+                cursor += duration.Value;
+            }
+            else
+            {
+                timelineKnown = false;
+            }
+        }
+
+        if (_playlistGrid.Rows.Count > 0)
+        {
+            var index = Math.Clamp(selectedIndex ?? GetSelectedPlaylistIndex() ?? 0, 0, _playlistGrid.Rows.Count - 1);
+            _playlistGrid.CurrentCell = _playlistGrid.Rows[index].Cells[0];
+            _playlistGrid.Rows[index].Selected = true;
+        }
+
+        UpdatePlaylistButtons();
+    }
+
+    private void NormalizePlaylistStatuses()
+    {
+        var hasPlaying = false;
+        var hasNext = false;
+        foreach (var item in _playlistItems)
+        {
+            if (!File.Exists(item.FullPath))
+            {
+                item.Status = PlaylistStatusMissing;
+                continue;
+            }
+
+            if (item.Status == PlaylistStatusPlaying)
+            {
+                hasPlaying = true;
+            }
+            else if (item.Status == PlaylistStatusNext)
+            {
+                hasNext = true;
+            }
+            else if (item.Status == PlaylistStatusMissing)
+            {
+                item.Status = PlaylistStatusReady;
+            }
+        }
+
+        if (!hasPlaying && !hasNext)
+        {
+            var next = FindNextPlayablePlaylistIndex(0);
+            if (next.HasValue)
+            {
+                _playlistItems[next.Value].Status = PlaylistStatusNext;
+            }
+        }
+    }
+
+    private static void ApplyPlaylistRowStyle(DataGridViewRow row, string status)
+    {
+        var color = status switch
+        {
+            PlaylistStatusPlaying => Color.FromArgb(124, 49, 45),
+            PlaylistStatusNext => Color.FromArgb(93, 76, 34),
+            PlaylistStatusPlayed => Color.FromArgb(48, 53, 58),
+            PlaylistStatusMissing => Color.FromArgb(96, 48, 31),
+            _ => row.Index % 2 == 0 ? Color.FromArgb(17, 20, 24) : Color.FromArgb(29, 34, 39),
+        };
+
+        row.DefaultCellStyle.BackColor = color;
+        row.DefaultCellStyle.SelectionBackColor = status switch
+        {
+            PlaylistStatusPlaying => Color.FromArgb(158, 64, 58),
+            PlaylistStatusNext => Color.FromArgb(126, 95, 38),
+            PlaylistStatusMissing => Color.FromArgb(136, 62, 37),
+            _ => Color.FromArgb(32, 116, 190),
+        };
+    }
+
+    private int? GetSelectedPlaylistIndex()
+    {
+        if (_playlistGrid.CurrentRow is not null &&
+            _playlistGrid.CurrentRow.Index >= 0 &&
+            _playlistGrid.CurrentRow.Index < _playlistItems.Count)
+        {
+            return _playlistGrid.CurrentRow.Index;
+        }
+
+        return null;
+    }
+
+    private TimeSpan? GetKnownMediaDuration(string path)
+    {
+        if (string.Equals(_selectedDurationPath, path, StringComparison.OrdinalIgnoreCase) &&
+            _selectedMediaDuration.HasValue)
+        {
+            return _selectedMediaDuration.Value;
+        }
+
+        foreach (DataGridViewRow row in _mediaGrid.Rows)
+        {
+            if (row.Tag is string rowPath &&
+                string.Equals(rowPath, path, StringComparison.OrdinalIgnoreCase) &&
+                row.Cells["Duration"].Value is string durationText &&
+                TryParseGridDuration(durationText, out var duration))
+            {
+                return duration;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryParseGridDuration(string text, out TimeSpan duration)
+    {
+        duration = TimeSpan.Zero;
+        var parts = text.Split(':');
+        if (parts.Length != 3 ||
+            !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var hours) ||
+            !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var minutes) ||
+            !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds))
+        {
+            return false;
+        }
+
+        duration = new TimeSpan(hours, minutes, seconds);
+        return true;
+    }
+
+    private static string FormatPlaylistTime(TimeSpan value)
+    {
+        return $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
+    }
+
+    private void UpdatePlaylistButtons()
+    {
+        var selectedIndex = GetSelectedPlaylistIndex();
+        var hasPlaylistSelection = selectedIndex.HasValue;
+        var controlsEnabled = _playlistGrid.Enabled;
+        _addToPlaylistButton.Enabled = controlsEnabled && (GetSelectedMediaGridPath() is not null || File.Exists(_inputPathBox.Text.Trim()));
+        _playPlaylistItemButton.Enabled = controlsEnabled && hasPlaylistSelection;
+        _removePlaylistItemButton.Enabled = controlsEnabled && hasPlaylistSelection;
+        _movePlaylistItemUpButton.Enabled = controlsEnabled && selectedIndex is > 0;
+        _movePlaylistItemDownButton.Enabled = controlsEnabled && selectedIndex.HasValue && selectedIndex.Value < _playlistItems.Count - 1;
+        _clearPlaylistButton.Enabled = controlsEnabled && _playlistItems.Count > 0;
     }
 
     private void StyleMediaGrid()
@@ -3732,6 +4340,7 @@ internal sealed class MainForm : Form
             return;
         }
 
+        var completedNormally = false;
         try
         {
             var previewOnly = PreviewOnlyMode;
@@ -3831,6 +4440,7 @@ internal sealed class MainForm : Form
                 : previewOnly
                     ? $"Preview engine exited with code {result.ExitCode}."
                     : $"DeckLink SDK engine exited with code {result.ExitCode}.");
+            completedNormally = !result.Cancelled && result.ExitCode == 0;
             SetStatus(result.Cancelled ? "Stopped" : $"Exited with code {result.ExitCode}", result.ExitCode == 0
                 ? Color.FromArgb(130, 210, 164)
                 : Color.FromArgb(232, 181, 105));
@@ -3854,6 +4464,11 @@ internal sealed class MainForm : Form
         finally
         {
             var stoppedSignal = _playbackStoppedSignal;
+            if (_playlistPlayingIndex.HasValue && !_switchingPlayback)
+            {
+                CompletePlaylistPlayback(completedNormally);
+            }
+
             StopPlaybackClock();
             SetPlaying(false);
             _playbackCancellation?.Dispose();
@@ -4204,6 +4819,8 @@ internal sealed class MainForm : Form
         _pcAudioCheckBox.Enabled = !isPlaying;
         _mediaTree.Enabled = true;
         _mediaGrid.Enabled = true;
+        _playlistGrid.Enabled = true;
+        UpdatePlaylistButtons();
         if (!isPlaying)
         {
             _pauseResumeButton.Text = "Pause";
@@ -4228,6 +4845,8 @@ internal sealed class MainForm : Form
         _pcAudioCheckBox.Enabled = enabled && !_isPlaying;
         _mediaTree.Enabled = enabled;
         _mediaGrid.Enabled = enabled;
+        _playlistGrid.Enabled = enabled;
+        UpdatePlaylistButtons();
         _stopButton.Enabled = _isPlaying;
     }
 
@@ -4488,6 +5107,53 @@ internal sealed class MainForm : Form
 
         var prefix = string.IsNullOrEmpty(line) ? string.Empty : $"[{DateTime.Now:HH:mm:ss}] ";
         _logBox.AppendText(prefix + line + Environment.NewLine);
+    }
+
+    private sealed class PlaylistItem
+    {
+        public PlaylistItem(string fullPath)
+        {
+            FullPath = fullPath;
+        }
+
+        public string FullPath { get; }
+
+        public TimeSpan TcIn { get; init; }
+
+        public TimeSpan? TcOut { get; init; }
+
+        public TimeSpan? SourceDuration { get; init; }
+
+        public string Status { get; set; } = PlaylistStatusReady;
+
+        public TimeSpan? PlayDuration
+        {
+            get
+            {
+                if (TcOut.HasValue && TcOut.Value > TcIn)
+                {
+                    return TcOut.Value - TcIn;
+                }
+
+                if (SourceDuration.HasValue && SourceDuration.Value > TcIn)
+                {
+                    return SourceDuration.Value - TcIn;
+                }
+
+                return null;
+            }
+        }
+
+        public PlaylistItem Snapshot()
+        {
+            return new PlaylistItem(FullPath)
+            {
+                TcIn = TcIn,
+                TcOut = TcOut,
+                SourceDuration = SourceDuration,
+                Status = Status,
+            };
+        }
     }
 
     private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
