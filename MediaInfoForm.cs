@@ -14,7 +14,7 @@ internal sealed class MediaInfoForm : Form
 
         Text = $"MediaInfo - {Path.GetFileName(path)}";
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(780, 700);
+        Size = new Size(960, 700);
         MinimumSize = new Size(570, 480);
         BackColor = Color.FromArgb(22, 25, 29);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
@@ -202,6 +202,7 @@ internal sealed class MediaInfoForm : Form
 
     private void CenterNearOwner()
     {
+        ApplyPreferredWidth();
         if (Owner is null)
         {
             var screen = Screen.FromControl(this).WorkingArea;
@@ -216,5 +217,15 @@ internal sealed class MediaInfoForm : Form
         x = Math.Clamp(x, area.Left, Math.Max(area.Left, area.Right - Width));
         y = Math.Clamp(y, area.Top, Math.Max(area.Top, area.Bottom - Height));
         Location = new Point(x, y);
+    }
+
+    private void ApplyPreferredWidth()
+    {
+        var area = Owner is not null
+            ? Screen.FromControl(Owner).WorkingArea
+            : Screen.FromControl(this).WorkingArea;
+        var referenceWidth = Owner?.Bounds.Width ?? area.Width;
+        var preferredWidth = Math.Clamp(referenceWidth / 2, MinimumSize.Width, area.Width);
+        Width = preferredWidth;
     }
 }
