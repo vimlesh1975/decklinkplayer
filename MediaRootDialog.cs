@@ -6,6 +6,7 @@ internal sealed class MediaRootDialog : Form
 
     private readonly TextBox _pathBox = new();
     private readonly TreeView _tree = new();
+    private readonly ToolTip _buttonToolTip = new();
     private readonly Button _useButton = new();
     private readonly Button _defaultButton = new();
     private readonly Button _cancelButton = new();
@@ -34,8 +35,20 @@ internal sealed class MediaRootDialog : Form
 
     public string SelectedPath { get; private set; }
 
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _buttonToolTip.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+
     private void BuildUi()
     {
+        ConfigureButtonToolTip();
+
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -101,11 +114,13 @@ internal sealed class MediaRootDialog : Form
         _useButton.Text = "Use";
         _useButton.Width = 96;
         StyleDialogButton(_useButton, Color.FromArgb(39, 125, 87));
+        _buttonToolTip.SetToolTip(_useButton, "Use the selected folder as the media library.");
         _useButton.Click += (_, _) => UseSelectedPath();
 
         _cancelButton.Text = "Cancel";
         _cancelButton.Width = 96;
         StyleDialogButton(_cancelButton, Color.FromArgb(52, 67, 82));
+        _buttonToolTip.SetToolTip(_cancelButton, "Close without changing the media library.");
         _cancelButton.Click += (_, _) =>
         {
             DialogResult = DialogResult.Cancel;
@@ -115,6 +130,7 @@ internal sealed class MediaRootDialog : Form
         _defaultButton.Text = "Default";
         _defaultButton.Width = 96;
         StyleDialogButton(_defaultButton, Color.FromArgb(63, 96, 135));
+        _buttonToolTip.SetToolTip(_defaultButton, "Fill in the default media library folder.");
         _defaultButton.Click += (_, _) => _pathBox.Text = _defaultPath;
 
         buttons.Controls.Add(_useButton);
@@ -124,6 +140,16 @@ internal sealed class MediaRootDialog : Form
 
         AcceptButton = _useButton;
         CancelButton = _cancelButton;
+    }
+
+    private void ConfigureButtonToolTip()
+    {
+        _buttonToolTip.AutoPopDelay = 12000;
+        _buttonToolTip.InitialDelay = 350;
+        _buttonToolTip.ReshowDelay = 100;
+        _buttonToolTip.ShowAlways = true;
+        _buttonToolTip.BackColor = Color.FromArgb(30, 35, 40);
+        _buttonToolTip.ForeColor = Color.FromArgb(236, 241, 244);
     }
 
     private void LoadRootNodes()

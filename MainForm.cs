@@ -22,6 +22,8 @@ internal sealed class MainForm : Form
     private const string PlaylistStatusMissing = "MISSING";
     private const string PlaylistStatusEnd = "END";
     private const string PlaylistEndMarkerText = "END";
+    private const string PlaylistTransitionCut = "Cut";
+    private const string PlaylistTransitionFadeBlack = "Fade Black";
     private const string PlaylistFileFilter = "DeckLink playlist (*.dpl)|*.dpl|JSON playlist (*.json)|*.json|All files (*.*)|*.*";
     private const string MediaGridDragDataFormat = "DeckLinkPlayer.MediaPath";
     private const uint PdhFormatDouble = 0x00000200;
@@ -58,6 +60,7 @@ internal sealed class MainForm : Form
     // Keep the implementation available for an isolated helper process later, but do not call it here.
     private const bool EnableInProcessNativeSeekPreview = false;
     private static readonly TimeSpan DefaultStillDuration = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultTransitionDuration = TimeSpan.FromSeconds(1);
     private static readonly JsonSerializerOptions PlaylistJsonOptions = new() { WriteIndented = true };
 
     private readonly FfmpegDeckLink _deckLink = new();
@@ -74,6 +77,7 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _mediaGridMenuPlayInVlc = new("Play in VLC");
     private readonly ToolStripMenuItem _mediaGridMenuFileInfo = new("File Information");
     private readonly FlowLayoutPanel _clipTransportPanel = new();
+    private readonly ToolTip _buttonToolTip = new();
     private readonly Button _clipPreviousCueButton = new();
     private readonly Button _clipSeekBackButton = new();
     private readonly Button _clipPlayButton = new();
@@ -82,6 +86,7 @@ internal sealed class MainForm : Form
     private readonly Button _clipResumeButton = new();
     private readonly Button _clipStopButton = new();
     private readonly Button _clipNextCueButton = new();
+    private readonly Button _clipPlayNextButton = new();
     private readonly Button _clipLoopButton = new();
     private readonly DataGridView _playlistGrid = new();
     private readonly ContextMenuStrip _playlistContextMenu = new();
@@ -177,6 +182,7 @@ internal sealed class MainForm : Form
     private readonly AudioMeterBar _rightAudioMeter = new();
     private readonly Label _statusLabel = new();
     private readonly Label _cpuUsageLabel = new();
+    private readonly Label _loadedFileLabel = new();
     private readonly Label _durationLabel = new();
     private readonly Label _currentTimeLabel = new();
     private readonly Label _positionStartLabel = new();
@@ -287,6 +293,7 @@ internal sealed class MainForm : Form
 
         _loadingSettings = true;
         BuildUi();
+        ConfigureButtonToolTips();
 
         _pixelFormatBox.Text = FfmpegDeckLink.DefaultPixelFormat;
         _audioChannelsBox.Value = FfmpegDeckLink.DefaultAudioChannels;
@@ -296,6 +303,7 @@ internal sealed class MainForm : Form
         _levelABox.SelectedItem = "true";
         LoadAppSettings();
         _inputPathBox.Text = FindDefaultMediaPath();
+        UpdateLoadedFileLabel();
         _durationProbeTimer.Tick += DurationProbeTimer_Tick;
         _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
@@ -330,6 +338,16 @@ internal sealed class MainForm : Form
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
             SaveAppSettings();
         };
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _buttonToolTip.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 
     private async void MainForm_KeyDown(object? sender, KeyEventArgs e)
@@ -596,9 +614,184 @@ internal sealed class MainForm : Form
         SetLogVisible(false);
     }
 
+    private void ConfigureButtonToolTips()
+    {
+        _buttonToolTip.AutoPopDelay = 12000;
+        _buttonToolTip.InitialDelay = 350;
+        _buttonToolTip.ReshowDelay = 100;
+        _buttonToolTip.ShowAlways = true;
+        ApplyToolTipTheme(_buttonToolTip, _darkMode);
+
+        SetButtonToolTip(_clearMediaSearchButton, "Clear the clip search box and show the selected folder.");
+        SetButtonToolTip(_refreshMediaButton, "Refresh the folder tree and clip list.");
+        SetButtonToolTip(_browseMediaRootButton, "Choose a different media library folder.");
+        SetButtonToolTip(_refreshDevicesButton, "Reload available DeckLink devices.");
+        SetButtonToolTip(_refreshModesButton, "Reload video modes for the selected DeckLink device.");
+
+        SetButtonToolTip(_addToPlaylistButton, "Add the selected clip to the playlist.");
+        SetButtonToolTip(_playPlaylistItemButton, "Play the selected playlist row.");
+        SetButtonToolTip(_movePlaylistItemUpButton, "Move the selected playlist row up.");
+        SetButtonToolTip(_movePlaylistItemDownButton, "Move the selected playlist row down.");
+        SetButtonToolTip(_removePlaylistItemButton, "Remove the selected playlist row.");
+        SetButtonToolTip(_clearPlaylistButton, "Clear all playlist rows.");
+        SetButtonToolTip(_openPlaylistButton, "Open a saved playlist file.");
+        SetButtonToolTip(_savePlaylistButton, "Save the current playlist.");
+        SetButtonToolTip(_setPlaylistStartTimeButton, "Set the selected row start time and update following rows.");
+
+        SetButtonToolTip(_stopButton, "Stop playback.");
+        SetButtonToolTip(_pauseResumeButton, "Pause or resume playback.");
+        SetButtonToolTip(_seekBackOneSecondButton, "Seek back 1 second.");
+        SetButtonToolTip(_seekForwardOneSecondButton, "Seek forward 1 second.");
+        SetButtonToolTip(_seekBackTenFramesButton, "Seek back 10 frames.");
+        SetButtonToolTip(_seekForwardTenFramesButton, "Seek forward 10 frames.");
+        SetButtonToolTip(_seekBackFiveFramesButton, "Seek back 5 frames.");
+        SetButtonToolTip(_seekForwardFiveFramesButton, "Seek forward 5 frames.");
+        SetButtonToolTip(_seekBackOneFrameButton, "Seek back 1 frame.");
+        SetButtonToolTip(_seekForwardOneFrameButton, "Seek forward 1 frame.");
+        SetButtonToolTip(_previousCueButton, "Cue the previous playable playlist row.");
+        SetButtonToolTip(_previousPlayButton, "Play the previous playable playlist row.");
+        SetButtonToolTip(_nextPlayButton, "Play the next playable playlist row.");
+        SetButtonToolTip(_nextCueButton, "Cue the next playable playlist row.");
+        SetButtonToolTip(_markInButton, "Mark trim IN at the current position.");
+        SetButtonToolTip(_markOutButton, "Mark trim OUT at the current position.");
+        SetButtonToolTip(_addTrimmedToPlaylistButton, "Add the marked IN to OUT range to the playlist.");
+        SetButtonToolTip(_goToInButton, "Seek to the marked IN point.");
+        SetButtonToolTip(_playFromInButton, "Play from the marked IN point.");
+        SetButtonToolTip(_playInToOutButton, "Play only the marked IN to OUT range.");
+        SetButtonToolTip(_goToTcButton, "Seek to the typed timecode.");
+        SetButtonToolTip(_playLastSecondsButton, "Play the last selected number of seconds before OUT.");
+        SetButtonToolTip(_goToOutButton, "Seek to the marked OUT point.");
+        SetButtonToolTip(_toggleSettingsButton, "Show or hide DeckLink output settings.");
+        SetButtonToolTip(_toggleLogButton, "Show or hide the playback log.");
+
+        SetButtonToolTip(_darkModeCheckBox, "Switch between dark and light mode.");
+        SetButtonToolTip(_autoPlayPlaylistCheckBox, "Repeat playlist playback until an END row is reached.");
+        SetButtonToolTip(_previewOnlyCheckBox, "Play in the preview window without DeckLink output.");
+        SetButtonToolTip(_pcAudioCheckBox, "Send preview playback audio to the PC speakers.");
+
+        ApplyMissingButtonToolTips(this);
+    }
+
+    private void SetButtonToolTip(Control control, string text)
+    {
+        _buttonToolTip.SetToolTip(control, text);
+    }
+
+    private void UpdateLoadedFileLabel()
+    {
+        var displayPath = GetLoadedDisplayPath();
+        if (string.IsNullOrWhiteSpace(displayPath))
+        {
+            _loadedFileLabel.Text = "--";
+            SetButtonToolTip(_loadedFileLabel, "No file loaded.");
+            return;
+        }
+
+        var displayName = GetDisplayFileName(displayPath);
+        _loadedFileLabel.Text = displayName;
+        SetButtonToolTip(_loadedFileLabel, displayPath);
+    }
+
+    private string GetLoadedDisplayPath()
+    {
+        if (_playbackIsTestPattern)
+        {
+            return "Test pattern";
+        }
+
+        if (!string.IsNullOrWhiteSpace(_playbackPath))
+        {
+            return _playbackPath;
+        }
+
+        return _inputPathBox.Text.Trim();
+    }
+
+    private static string GetDisplayFileName(string path)
+    {
+        try
+        {
+            var fileName = Path.GetFileName(path);
+            return string.IsNullOrWhiteSpace(fileName) ? path : fileName;
+        }
+        catch (ArgumentException)
+        {
+            return path;
+        }
+    }
+
+    private void ApplyMissingButtonToolTips(Control control)
+    {
+        foreach (Control child in control.Controls)
+        {
+            if (child is Button button && string.IsNullOrWhiteSpace(_buttonToolTip.GetToolTip(button)))
+            {
+                var text = button.Tag as string ?? button.Text;
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    SetButtonToolTip(button, NormalizeToolTipText(text));
+                }
+            }
+
+            ApplyMissingButtonToolTips(child);
+        }
+    }
+
+    private static string NormalizeToolTipText(string text)
+    {
+        text = text.Trim();
+        return text.EndsWith(".", StringComparison.Ordinal) ? text : $"{text}.";
+    }
+
+    private static void ApplyToolTipTheme(ToolTip toolTip, bool dark)
+    {
+        toolTip.BackColor = dark ? Color.FromArgb(30, 35, 40) : Color.White;
+        toolTip.ForeColor = dark ? Color.FromArgb(236, 241, 244) : Color.FromArgb(24, 29, 34);
+    }
+
     private Control BuildHeader()
     {
-        var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(2, 0, 2, 0) };
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Padding = new Padding(2, 0, 2, 0),
+            BackColor = BackColor,
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 720));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var leftPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0),
+            BackColor = BackColor,
+        };
+
+        var rightPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            BackColor = BackColor,
+        };
+        rightPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+        rightPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        rightPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        var rightTopRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Margin = new Padding(0),
+            Padding = new Padding(0, 2, 0, 0),
+            BackColor = BackColor,
+        };
 
         var title = new Label
         {
@@ -612,7 +805,7 @@ internal sealed class MainForm : Form
 
         _statusLabel.Text = "Ready";
         _statusLabel.AutoSize = false;
-        _statusLabel.Size = new Size(1040, 18);
+        _statusLabel.Size = new Size(820, 18);
         _statusLabel.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
         _statusLabel.ForeColor = Color.FromArgb(130, 210, 164);
         _statusLabel.Location = new Point(332, 18);
@@ -621,7 +814,7 @@ internal sealed class MainForm : Form
         _darkModeCheckBox.Checked = true;
         _darkModeCheckBox.AutoSize = false;
         _darkModeCheckBox.Size = new Size(124, 28);
-        _darkModeCheckBox.Location = new Point(1474, 18);
+        _darkModeCheckBox.Margin = new Padding(14, 0, 0, 0);
         _darkModeCheckBox.TextAlign = ContentAlignment.MiddleLeft;
         _darkModeCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
         _darkModeCheckBox.BackColor = BackColor;
@@ -631,19 +824,34 @@ internal sealed class MainForm : Form
             SetStatus(_darkModeCheckBox.Checked ? "Dark mode" : "Light mode", Color.FromArgb(130, 210, 164));
         };
 
+        _loadedFileLabel.Text = "--";
+        _loadedFileLabel.AutoSize = false;
+        _loadedFileLabel.Dock = DockStyle.Fill;
+        _loadedFileLabel.Margin = new Padding(0, 0, 0, 0);
+        _loadedFileLabel.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+        _loadedFileLabel.TextAlign = ContentAlignment.MiddleRight;
+        _loadedFileLabel.AutoEllipsis = true;
+        _loadedFileLabel.Padding = new Padding(0, 0, 2, 0);
+        _loadedFileLabel.BorderStyle = BorderStyle.None;
+        ApplyLoadedFileLabelTheme(_darkMode);
+
         _cpuUsageLabel.Text = "PC CPU 0%";
         _cpuUsageLabel.AutoSize = false;
-        _cpuUsageLabel.Width = 260;
+        _cpuUsageLabel.Size = new Size(220, 32);
+        _cpuUsageLabel.Margin = new Padding(0);
         _cpuUsageLabel.Font = new Font("Segoe UI Semibold", 20F, FontStyle.Bold, GraphicsUnit.Point);
         _cpuUsageLabel.ForeColor = Color.FromArgb(239, 244, 248);
         _cpuUsageLabel.TextAlign = ContentAlignment.MiddleRight;
-        _cpuUsageLabel.Dock = DockStyle.Right;
         _cpuUsageLabel.Padding = new Padding(0, 5, 0, 0);
 
-        panel.Controls.Add(title);
-        panel.Controls.Add(_statusLabel);
-        panel.Controls.Add(_darkModeCheckBox);
-        panel.Controls.Add(_cpuUsageLabel);
+        leftPanel.Controls.Add(title);
+        leftPanel.Controls.Add(_statusLabel);
+        rightTopRow.Controls.Add(_darkModeCheckBox);
+        rightTopRow.Controls.Add(_cpuUsageLabel);
+        rightPanel.Controls.Add(rightTopRow, 0, 0);
+        rightPanel.Controls.Add(_loadedFileLabel, 0, 1);
+        panel.Controls.Add(leftPanel, 0, 0);
+        panel.Controls.Add(rightPanel, 1, 0);
         return panel;
     }
 
@@ -703,7 +911,11 @@ internal sealed class MainForm : Form
         panel.Size = new Size(SourceColumnWidth - panel.Margin.Horizontal, SourcePanelHeight);
 
         _inputPathBox.PlaceholderText = "Media file to play";
-        _inputPathBox.TextChanged += (_, _) => ScheduleDurationProbe();
+        _inputPathBox.TextChanged += (_, _) =>
+        {
+            UpdateLoadedFileLabel();
+            ScheduleDurationProbe();
+        };
         _mediaRootPathBox.Text = _mediaRootPath;
         _mediaRootPathBox.ReadOnly = true;
 
@@ -789,7 +1001,7 @@ internal sealed class MainForm : Form
             Margin = new Padding(0),
         };
         clipPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        clipPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        clipPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         clipPanel.Controls.Add(_mediaGrid, 0, 0);
         clipPanel.Controls.Add(BuildClipTransportRow(), 0, 1);
 
@@ -803,67 +1015,48 @@ internal sealed class MainForm : Form
         _clipTransportPanel.Dock = DockStyle.Fill;
         _clipTransportPanel.FlowDirection = FlowDirection.LeftToRight;
         _clipTransportPanel.WrapContents = false;
-        _clipTransportPanel.Padding = new Padding(0, 6, 0, 4);
+        _clipTransportPanel.Padding = new Padding(0, 5, 0, 4);
         _clipTransportPanel.Margin = new Padding(0);
-        _clipTransportPanel.BackColor = Color.FromArgb(78, 220, 205);
+        _clipTransportPanel.BackColor = ThemePanelColor(_darkMode);
         _clipTransportPanel.Controls.Clear();
 
-        ConfigureClipTransportButton(_clipPreviousCueButton, "|<", "Cue previous clip", () => CueRelativeMediaGridItemAsync(-1));
-        ConfigureClipTransportButton(_clipSeekBackButton, "<<", "Seek back 5 seconds", () => SeekRelativeAsync(TimeSpan.FromSeconds(-5)));
-        ConfigureClipTransportButton(_clipPlayButton, ">", "Play selected clip", PlaySelectedMediaGridAsync);
-        ConfigureClipTransportButton(_clipSeekForwardButton, ">>", "Seek forward 5 seconds", () => SeekRelativeAsync(TimeSpan.FromSeconds(5)));
-        ConfigureClipTransportButton(_clipPauseButton, "||", "Pause", () =>
-        {
-            PausePlayback();
-            return Task.CompletedTask;
-        });
-        ConfigureClipTransportButton(_clipResumeButton, "||>", "Resume", () =>
-        {
-            ResumePlayback();
-            return Task.CompletedTask;
-        });
-        ConfigureClipTransportButton(_clipStopButton, "[]", "Stop", () =>
+        ConfigureClipTransportButton(_clipPreviousCueButton, "Cue", "Cue selected clip", CueSelectedMediaGridAsync, width: 58);
+        ConfigureClipTransportButton(_clipPlayButton, "Play", "Play selected clip", PlaySelectedMediaGridAsync, width: 58);
+        ConfigureClipTransportButton(_clipPauseButton, "Pause", "Pause or resume playback", TogglePauseResumePlaybackAsync, width: 86);
+        ConfigureClipTransportButton(_clipStopButton, "Stop", "Stop playback", () =>
         {
             StopPlayback();
             return Task.CompletedTask;
-        });
-        ConfigureClipTransportButton(_clipNextCueButton, ">|", "Cue next clip", () => CueRelativeMediaGridItemAsync(1));
-        ConfigureClipTransportButton(_clipLoopButton, "Loop", "Toggle single clip loop", () =>
-        {
-            ToggleClipLoopPlayback();
-            return Task.CompletedTask;
-        }, width: 58);
+        }, width: 62);
+        ConfigureClipTransportButton(_clipNextCueButton, "Cue Next", "Cue next clip", () => CueRelativeMediaGridItemAsync(1), width: 86);
+        ConfigureClipTransportButton(_clipPlayNextButton, "Play Next", "Play next clip", () => PlayRelativeMediaGridItemAsync(1), width: 92);
 
         _clipTransportPanel.Controls.AddRange(
             [
                 _clipPreviousCueButton,
-                _clipSeekBackButton,
                 _clipPlayButton,
-                _clipSeekForwardButton,
                 _clipPauseButton,
-                _clipResumeButton,
                 _clipStopButton,
                 _clipNextCueButton,
-                _clipLoopButton,
+                _clipPlayNextButton,
             ]);
         UpdateClipTransportButtons();
         return _clipTransportPanel;
     }
 
-    private static void ConfigureClipTransportButton(Button button, string text, string tooltip, Func<Task> action, int width = 44)
+    private void ConfigureClipTransportButton(Button button, string text, string tooltip, Func<Task> action, int width = 44)
     {
         button.Text = text;
         button.Width = width;
-        button.Height = 30;
-        button.Margin = new Padding(0, 0, 10, 0);
-        button.FlatStyle = FlatStyle.Flat;
-        button.FlatAppearance.BorderSize = 0;
-        button.BackColor = Color.White;
-        button.ForeColor = Color.Black;
-        button.Font = new Font("Segoe UI Symbol", 10F, FontStyle.Bold, GraphicsUnit.Point);
+        button.Height = 28;
+        button.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(button, Color.FromArgb(52, 67, 82));
+        button.Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point);
         button.Cursor = Cursors.Hand;
         button.TextAlign = ContentAlignment.MiddleCenter;
         button.Tag = tooltip;
+        SetButtonToolTip(button, tooltip);
+        ApplyButtonTheme(button, _darkMode);
         button.Click += async (_, _) => await action();
     }
 
@@ -878,8 +1071,6 @@ internal sealed class MainForm : Form
             BackColor = Color.FromArgb(30, 35, 40),
         };
 
-        ConfigurePlaylistButton(_addToPlaylistButton, "Add", Color.FromArgb(39, 125, 87), AddSelectedMediaToPlaylist);
-        ConfigurePlaylistButton(_playPlaylistItemButton, "Play", Color.FromArgb(63, 96, 135), async () => await PlaySelectedPlaylistItemAsync());
         ConfigurePlaylistButton(_movePlaylistItemUpButton, "Up", Color.FromArgb(52, 67, 82), MoveSelectedPlaylistItemUp);
         ConfigurePlaylistButton(_movePlaylistItemDownButton, "Down", Color.FromArgb(52, 67, 82), MoveSelectedPlaylistItemDown);
         ConfigurePlaylistButton(_removePlaylistItemButton, "Remove", Color.FromArgb(149, 64, 58), RemoveSelectedPlaylistItem);
@@ -898,8 +1089,6 @@ internal sealed class MainForm : Form
 
         row.Controls.AddRange(
             [
-                _addToPlaylistButton,
-                _playPlaylistItemButton,
                 _movePlaylistItemUpButton,
                 _movePlaylistItemDownButton,
                 _removePlaylistItemButton,
@@ -1301,6 +1490,7 @@ internal sealed class MainForm : Form
         ConfigureSeekStepButton(_seekForwardFiveFramesButton, "+5 fr", () => SeekRelativeFramesAsync(5));
         ConfigureSeekStepButton(_seekBackOneFrameButton, "-1 fr", () => SeekRelativeFramesAsync(-1));
         ConfigureSeekStepButton(_seekForwardOneFrameButton, "+1 fr", () => SeekRelativeFramesAsync(1));
+        ConfigureTransportActionButton(_playPlaylistItemButton, "Play", 70, Color.FromArgb(63, 96, 135), PlaySelectedPlaylistItemAsync);
         ConfigureTrimButton(_previousCueButton, "Prev Cue", 86, Color.FromArgb(52, 67, 82), () => CueRelativePlaylistItem(-1));
         ConfigureTransportActionButton(_previousPlayButton, "Prev Play", 90, Color.FromArgb(63, 96, 135), () => PlayRelativePlaylistItemAsync(-1));
         ConfigureTransportActionButton(_nextPlayButton, "Next Play", 90, Color.FromArgb(63, 96, 135), () => PlayRelativePlaylistItemAsync(1));
@@ -1493,22 +1683,27 @@ internal sealed class MainForm : Form
         transportRow.Controls.Add(rightPanel);
         transportRow.Controls.Add(markOutPanel);
 
+        var goToInPanel = BuildSeekButtonPanel([_goToInButton], MeasureControlsWidth([_goToInButton]));
+        goToInPanel.Location = new Point(markInPanel.Left, 78);
+
+        var goToOutPanel = BuildSeekButtonPanel([_goToOutButton], MeasureControlsWidth([_goToOutButton]));
+        goToOutPanel.Location = new Point(Math.Max(0, markOutPanel.Right - goToOutPanel.Width), 78);
+
         var commandControls = new Control[]
         {
-            _goToInButton,
             _playFromInButton,
             _playInToOutButton,
             _goToTcButton,
             _goToTcBox,
-            _goToOutButton,
+            _lastSecondsBox,
+            _playLastSecondsButton,
         };
         var playlistCommandControls = new Control[]
         {
             _previousCueButton,
             _previousPlayButton,
-            _lastSecondsBox,
+            _playPlaylistItemButton,
             _nextPlayButton,
-            _playLastSecondsButton,
             _nextCueButton,
         };
         var commandWidth = MeasureControlsWidth(commandControls);
@@ -1521,6 +1716,8 @@ internal sealed class MainForm : Form
 
         panel.Controls.Add(seekPanel);
         panel.Controls.Add(transportRow);
+        panel.Controls.Add(goToInPanel);
+        panel.Controls.Add(goToOutPanel);
         panel.Controls.Add(commandPanel);
         panel.Controls.Add(playlistCommandPanel);
         return panel;
@@ -1827,6 +2024,7 @@ internal sealed class MainForm : Form
     {
         var button = new Button { Text = text };
         StyleButton(button, Color.FromArgb(52, 67, 82));
+        SetButtonToolTip(button, text);
         return button;
     }
 
@@ -1859,6 +2057,7 @@ internal sealed class MainForm : Form
         ApplyDataGridTheme(_mediaGrid, dark);
         ApplyTreeTheme(_mediaTree, dark);
         ApplyContextMenuTheme();
+        ApplyToolTipTheme(_buttonToolTip, dark);
 
         var selectedIndex = GetSelectedPlaylistIndex();
         RefreshPlaylistGrid(selectedIndex);
@@ -1907,7 +2106,7 @@ internal sealed class MainForm : Form
                 control.BackColor = ReferenceEquals(control, this)
                     ? ThemeBackColor(dark)
                     : ReferenceEquals(control, _clipTransportPanel)
-                    ? Color.FromArgb(78, 220, 205)
+                    ? ThemePanelColor(dark)
                     : control.Controls.Contains(_appPreviewBox)
                     ? Color.Black
                     : ThemePanelColor(dark);
@@ -1936,10 +2135,22 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (ReferenceEquals(label, _loadedFileLabel))
+        {
+            ApplyLoadedFileLabelTheme(dark);
+            return;
+        }
+
         label.BackColor = ThemePanelColor(dark);
         label.ForeColor = ReferenceEquals(label, _cpuUsageLabel)
             ? ThemeTextColor(dark)
             : ThemeMutedTextColor(dark);
+    }
+
+    private void ApplyLoadedFileLabelTheme(bool dark)
+    {
+        _loadedFileLabel.BackColor = ThemePanelColor(dark);
+        _loadedFileLabel.ForeColor = ThemeMutedTextColor(dark);
     }
 
     private void ApplyInputTheme(Control input, bool dark)
@@ -1952,13 +2163,10 @@ internal sealed class MainForm : Form
     {
         if (IsClipTransportButton(button))
         {
-            button.BackColor = ReferenceEquals(button, _clipLoopButton) && _clipLoopPlaybackEnabled
-                ? Color.FromArgb(39, 125, 87)
-                : Color.White;
-            button.ForeColor = ReferenceEquals(button, _clipLoopButton) && _clipLoopPlaybackEnabled
-                ? Color.White
-                : Color.Black;
-            button.FlatAppearance.BorderSize = 0;
+            var clipAccent = GetClipTransportAccentColor(button, dark);
+            button.BackColor = clipAccent.BackColor;
+            button.ForeColor = clipAccent.ForeColor;
+            button.FlatAppearance.BorderSize = dark ? 0 : 1;
             button.FlatAppearance.BorderColor = button.BackColor;
             return;
         }
@@ -1980,7 +2188,35 @@ internal sealed class MainForm : Form
             ReferenceEquals(button, _clipResumeButton) ||
             ReferenceEquals(button, _clipStopButton) ||
             ReferenceEquals(button, _clipNextCueButton) ||
+            ReferenceEquals(button, _clipPlayNextButton) ||
             ReferenceEquals(button, _clipLoopButton);
+    }
+
+    private (Color BackColor, Color ForeColor) GetClipTransportAccentColor(Button button, bool dark)
+    {
+        var isPlay = ReferenceEquals(button, _clipPlayButton) ||
+            ReferenceEquals(button, _clipPreviousCueButton) ||
+            ReferenceEquals(button, _clipNextCueButton) ||
+            ReferenceEquals(button, _clipPlayNextButton);
+        var isPause = ReferenceEquals(button, _clipPauseButton) ||
+            ReferenceEquals(button, _clipResumeButton);
+        var isDanger = ReferenceEquals(button, _clipStopButton);
+        var isLoopActive = ReferenceEquals(button, _clipLoopButton) && _clipLoopPlaybackEnabled;
+
+        if (dark)
+        {
+            if (isDanger) return (Color.FromArgb(149, 64, 58), Color.White);
+            if (isPause) return (Color.FromArgb(183, 126, 46), Color.White);
+            if (isLoopActive) return (Color.FromArgb(39, 125, 87), Color.White);
+            if (isPlay) return (Color.FromArgb(63, 96, 135), Color.White);
+            return (Color.FromArgb(52, 67, 82), Color.White);
+        }
+
+        if (isDanger) return (Color.FromArgb(196, 83, 75), Color.White);
+        if (isPause) return (Color.FromArgb(205, 143, 47), Color.White);
+        if (isLoopActive) return (Color.FromArgb(40, 145, 97), Color.White);
+        if (isPlay) return (Color.FromArgb(55, 117, 178), Color.White);
+        return (Color.FromArgb(225, 231, 237), Color.FromArgb(24, 29, 34));
     }
 
     private (Color BackColor, Color ForeColor) GetButtonAccentColor(Button button, bool dark)
@@ -2274,6 +2510,20 @@ internal sealed class MainForm : Form
         });
         _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
+            Name = "Transition",
+            HeaderText = "Transition",
+            Width = 88,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "TransitionDuration",
+            HeaderText = "Trans Dur",
+            Width = 72,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
+        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
             Name = "EndTime",
             HeaderText = "End Time",
             Width = 86,
@@ -2348,7 +2598,7 @@ internal sealed class MainForm : Form
         ConfigurePlaceholderSubmenu(_playlistMenuInsertDecklink, "DeckLink input insert is not implemented yet.");
         ConfigurePlaceholderSubmenu(_playlistMenuShowLiveDecklink, "Live DeckLink preview is not implemented yet.");
         ConfigurePlaceholderSubmenu(_playlistMenuInsertFilter, "Filter insert is not implemented yet.");
-        ConfigurePlaceholderSubmenu(_playlistMenuChangeAllTransition, "Transition changes are not implemented yet.");
+        ConfigurePlaylistTransitionSubmenu();
         _playlistMenuInsertBlank.Enabled = false;
         _playlistMenuRefreshThumbnail.Enabled = false;
 
@@ -2385,6 +2635,22 @@ internal sealed class MainForm : Form
             ]);
         _playlistGrid.ContextMenuStrip = _playlistContextMenu;
         ApplyContextMenuTheme(_playlistContextMenu, _darkMode);
+    }
+
+    private void ConfigurePlaylistTransitionSubmenu()
+    {
+        _playlistMenuChangeAllTransition.DropDownItems.Clear();
+        AddPlaylistTransitionMenuItem("Cut", PlaylistTransitionCut, DefaultTransitionDuration);
+        AddPlaylistTransitionMenuItem("Fade Through Black 0.5 sec", PlaylistTransitionFadeBlack, TimeSpan.FromMilliseconds(500));
+        AddPlaylistTransitionMenuItem("Fade Through Black 1 sec", PlaylistTransitionFadeBlack, TimeSpan.FromSeconds(1));
+        AddPlaylistTransitionMenuItem("Fade Through Black 2 sec", PlaylistTransitionFadeBlack, TimeSpan.FromSeconds(2));
+    }
+
+    private void AddPlaylistTransitionMenuItem(string text, string transition, TimeSpan duration)
+    {
+        var item = new ToolStripMenuItem(text);
+        item.Click += (_, _) => SetAllPlaylistTransitions(transition, duration);
+        _playlistMenuChangeAllTransition.DropDownItems.Add(item);
     }
 
     private static void RebindMenuClick(ToolStripMenuItem item, EventHandler handler)
@@ -2437,6 +2703,7 @@ internal sealed class MainForm : Form
         _playlistMenuDeselectAll.Enabled = _playlistItems.Count > 0;
         _playlistMenuSetStartTime.Enabled = selectedCanSetStart;
         _playlistMenuInsertPlaylist.Enabled = !_isPlaying && !_playlistPlayingIndex.HasValue;
+        _playlistMenuChangeAllTransition.Enabled = _playlistItems.Any(item => !item.IsEndMarker);
         _playlistMenuPlayInFfplay.Enabled = selectedFileExists;
     }
 
@@ -2568,6 +2835,33 @@ internal sealed class MainForm : Form
     private void PlaylistMenuDeselectAll_Click(object? sender, EventArgs e)
     {
         SetPlaylistPlayEnabledForAll(false);
+    }
+
+    private void SetAllPlaylistTransitions(string transition, TimeSpan duration)
+    {
+        var changed = 0;
+        var normalizedTransition = NormalizePlaylistTransition(transition);
+        var normalizedDuration = duration > TimeSpan.Zero ? duration : DefaultTransitionDuration;
+        foreach (var item in _playlistItems)
+        {
+            if (item.IsEndMarker)
+            {
+                continue;
+            }
+
+            item.Transition = normalizedTransition;
+            item.TransitionDuration = normalizedDuration;
+            changed++;
+        }
+
+        RefreshPlaylistGrid(GetSelectedPlaylistIndex());
+        SetStatus(
+            changed == 0
+                ? "No playlist rows to change"
+                : normalizedTransition == PlaylistTransitionCut
+                    ? $"Changed {changed} row(s) to Cut"
+                    : $"Changed {changed} row(s) to Fade Black {FormatPlaylistTime(normalizedDuration)}",
+            changed == 0 ? Color.FromArgb(232, 181, 105) : Color.FromArgb(130, 210, 164));
     }
 
     private void PlaylistMenuPlayInFfplay_Click(object? sender, EventArgs e)
@@ -2762,6 +3056,8 @@ internal sealed class MainForm : Form
         {
             item.PlayEnabled = false;
             item.LoopEnabled = false;
+            item.Transition = PlaylistTransitionCut;
+            item.TransitionDuration = DefaultTransitionDuration;
             item.Status = PlaylistStatusEnd;
             RefreshPlaylistGrid(e.RowIndex);
             return;
@@ -2886,6 +3182,8 @@ internal sealed class MainForm : Form
 
         item.PlayEnabled = false;
         item.LoopEnabled = false;
+        item.Transition = PlaylistTransitionCut;
+        item.TransitionDuration = DefaultTransitionDuration;
         item.Status = PlaylistStatusEnd;
     }
 
@@ -2896,6 +3194,8 @@ internal sealed class MainForm : Form
             {
                 PlayEnabled = false,
                 LoopEnabled = false,
+                Transition = PlaylistTransitionCut,
+                TransitionDuration = DefaultTransitionDuration,
                 Status = PlaylistStatusEnd,
             },
             "Inserted END marker");
@@ -3137,6 +3437,8 @@ internal sealed class MainForm : Form
             TcOut = FormatPlaylistFileTime(item.TcOut),
             SourceDuration = FormatPlaylistFileTime(item.SourceDuration),
             TimelineStart = FormatPlaylistFileTime(item.TimelineStartOverride),
+            Transition = item.Transition,
+            TransitionDuration = FormatPlaylistFileTime(item.TransitionDuration),
             PlayEnabled = item.PlayEnabled,
             LoopEnabled = item.LoopEnabled,
         };
@@ -3150,6 +3452,8 @@ internal sealed class MainForm : Form
             {
                 PlayEnabled = false,
                 LoopEnabled = false,
+                Transition = PlaylistTransitionCut,
+                TransitionDuration = DefaultTransitionDuration,
                 Status = PlaylistStatusEnd,
             };
         }
@@ -3172,6 +3476,9 @@ internal sealed class MainForm : Form
         var timelineStart = TryParsePlaylistFileTime(fileItem.TimelineStart, out var parsedTimelineStart)
             ? parsedTimelineStart
             : (TimeSpan?)null;
+        var transitionDuration = TryParsePlaylistFileTime(fileItem.TransitionDuration, out var parsedTransitionDuration)
+            ? parsedTransitionDuration
+            : DefaultTransitionDuration;
 
         return new PlaylistItem(path)
         {
@@ -3179,6 +3486,8 @@ internal sealed class MainForm : Form
             TcOut = tcOut,
             SourceDuration = sourceDuration,
             TimelineStartOverride = timelineStart,
+            Transition = NormalizePlaylistTransition(fileItem.Transition),
+            TransitionDuration = transitionDuration > TimeSpan.Zero ? transitionDuration : DefaultTransitionDuration,
             PlayEnabled = fileItem.PlayEnabled,
             LoopEnabled = fileItem.LoopEnabled,
             Status = File.Exists(path) ? PlaylistStatusReady : PlaylistStatusMissing,
@@ -3205,6 +3514,23 @@ internal sealed class MainForm : Form
 
         return TimeSpan.TryParse(text, CultureInfo.InvariantCulture, out value) ||
             TryParseGridDuration(text, out value);
+    }
+
+    private static string NormalizePlaylistTransition(string? transition)
+    {
+        if (string.IsNullOrWhiteSpace(transition))
+        {
+            return PlaylistTransitionCut;
+        }
+
+        return transition.Contains("fade", StringComparison.OrdinalIgnoreCase)
+            ? PlaylistTransitionFadeBlack
+            : PlaylistTransitionCut;
+    }
+
+    private static bool IsFadeBlackTransition(string? transition)
+    {
+        return string.Equals(NormalizePlaylistTransition(transition), PlaylistTransitionFadeBlack, StringComparison.Ordinal);
     }
 
     private void SetSelectedPlaylistStartTime()
@@ -3311,6 +3637,17 @@ internal sealed class MainForm : Form
         StyleButton(cancelButton, Color.FromArgb(52, 67, 82));
         ApplyButtonTheme(okButton, _darkMode);
         ApplyButtonTheme(cancelButton, _darkMode);
+
+        using var dialogToolTip = new ToolTip
+        {
+            AutoPopDelay = 12000,
+            InitialDelay = 350,
+            ReshowDelay = 100,
+            ShowAlways = true,
+        };
+        ApplyToolTipTheme(dialogToolTip, _darkMode);
+        dialogToolTip.SetToolTip(okButton, "Apply the start time.");
+        dialogToolTip.SetToolTip(cancelButton, "Close without changing start time.");
 
         dialog.Controls.AddRange([label, input, okButton, cancelButton]);
         dialog.AcceptButton = okButton;
@@ -3699,6 +4036,8 @@ internal sealed class MainForm : Form
                 {
                     PlayEnabled = false,
                     LoopEnabled = false,
+                    Transition = PlaylistTransitionCut,
+                    TransitionDuration = DefaultTransitionDuration,
                     Status = PlaylistStatusEnd,
                 };
             }
@@ -3757,6 +4096,8 @@ internal sealed class MainForm : Form
             {
                 PlayEnabled = false,
                 LoopEnabled = false,
+                Transition = PlaylistTransitionCut,
+                TransitionDuration = DefaultTransitionDuration,
                 Status = PlaylistStatusEnd,
             };
         }
@@ -3768,6 +4109,8 @@ internal sealed class MainForm : Form
             TcOut = source.TcOut,
             PlayEnabled = source.PlayEnabled,
             LoopEnabled = source.LoopEnabled,
+            Transition = source.Transition,
+            TransitionDuration = source.TransitionDuration,
             Status = PlaylistStatusReady,
         };
     }
@@ -3781,6 +4124,8 @@ internal sealed class MainForm : Form
             {
                 _playlistItems[i].PlayEnabled = false;
                 _playlistItems[i].LoopEnabled = false;
+                _playlistItems[i].Transition = PlaylistTransitionCut;
+                _playlistItems[i].TransitionDuration = DefaultTransitionDuration;
                 _playlistItems[i].Status = PlaylistStatusEnd;
                 continue;
             }
@@ -3847,6 +4192,8 @@ internal sealed class MainForm : Form
             {
                 _playlistItems[i].PlayEnabled = false;
                 _playlistItems[i].LoopEnabled = false;
+                _playlistItems[i].Transition = PlaylistTransitionCut;
+                _playlistItems[i].TransitionDuration = DefaultTransitionDuration;
                 _playlistItems[i].Status = PlaylistStatusEnd;
                 continue;
             }
@@ -4157,12 +4504,116 @@ internal sealed class MainForm : Form
         MarkPlaylistItemPlaying(index);
         AppendLog($"Starting playlist row {index + 1}: {Path.GetFileName(item.FullPath)}");
         var playDuration = item.PlayDuration;
+        var transitionFilters = BuildPlaylistTransitionFilters(index, item);
         await StartPlaybackAsync(
             dryRun: false,
             startOffset: item.TcIn,
             playDuration: playDuration,
             sourceDuration: item.SourceDuration,
-            playLoop: item.LoopEnabled && !playDuration.HasValue);
+            playLoop: item.LoopEnabled && !playDuration.HasValue,
+            videoFilter: transitionFilters.VideoFilter,
+            audioFilter: transitionFilters.AudioFilter);
+    }
+
+    private PlaylistTransitionFilters BuildPlaylistTransitionFilters(int index, PlaylistItem item)
+    {
+        if (item.IsEndMarker)
+        {
+            return PlaylistTransitionFilters.Empty;
+        }
+
+        var videoFilters = new List<string>();
+        var audioFilters = new List<string>();
+        var previousIndex = FindPreviousPlayablePlaylistIndex(index);
+        if (previousIndex.HasValue &&
+            TryGetEffectiveTransitionDuration(_playlistItems[previousIndex.Value].Transition, _playlistItems[previousIndex.Value].TransitionDuration, item.PlayDuration, out var fadeInDuration))
+        {
+            var duration = FormatFilterSeconds(fadeInDuration);
+            videoFilters.Add($"fade=t=in:st=0:d={duration}:color=black");
+            audioFilters.Add($"afade=t=in:st=0:d={duration}");
+        }
+
+        if (FindNextRepeatingPlaylistIndex(index, out _).HasValue &&
+            item.PlayDuration.HasValue &&
+            TryGetEffectiveTransitionDuration(item.Transition, item.TransitionDuration, item.PlayDuration, out var fadeOutDuration))
+        {
+            var duration = FormatFilterSeconds(fadeOutDuration);
+            var start = FormatFilterSeconds(item.PlayDuration.Value - fadeOutDuration);
+            videoFilters.Add($"fade=t=out:st={start}:d={duration}:color=black");
+            audioFilters.Add($"afade=t=out:st={start}:d={duration}");
+        }
+
+        return new PlaylistTransitionFilters(
+            videoFilters.Count > 0 ? string.Join(",", videoFilters) : null,
+            audioFilters.Count > 0 ? string.Join(",", audioFilters) : null);
+    }
+
+    private int? FindPreviousPlayablePlaylistIndex(int referenceIndex)
+    {
+        if (_playlistItems.Count == 0 || referenceIndex < 0 || referenceIndex >= _playlistItems.Count)
+        {
+            return null;
+        }
+
+        var index = referenceIndex == 0 ? _playlistItems.Count - 1 : referenceIndex - 1;
+        for (var offset = 0; offset < _playlistItems.Count - 1; offset++)
+        {
+            var item = _playlistItems[index];
+            if (item.IsEndMarker)
+            {
+                return null;
+            }
+
+            if (item.PlayEnabled && File.Exists(item.FullPath))
+            {
+                return index;
+            }
+
+            index = index == 0 ? _playlistItems.Count - 1 : index - 1;
+        }
+
+        return null;
+    }
+
+    private static bool TryGetEffectiveTransitionDuration(
+        string transition,
+        TimeSpan requestedDuration,
+        TimeSpan? playDuration,
+        out TimeSpan duration)
+    {
+        duration = TimeSpan.Zero;
+        if (!IsFadeBlackTransition(transition))
+        {
+            return false;
+        }
+
+        duration = requestedDuration > TimeSpan.Zero ? requestedDuration : DefaultTransitionDuration;
+        if (playDuration.HasValue)
+        {
+            if (playDuration.Value <= TimeSpan.FromMilliseconds(250))
+            {
+                duration = TimeSpan.Zero;
+                return false;
+            }
+
+            var maxDuration = TimeSpan.FromSeconds(Math.Max(0.1d, playDuration.Value.TotalSeconds / 2d));
+            if (duration > maxDuration)
+            {
+                duration = maxDuration;
+            }
+        }
+
+        return duration > TimeSpan.Zero;
+    }
+
+    private static string FormatFilterSeconds(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero)
+        {
+            value = TimeSpan.Zero;
+        }
+
+        return value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
     private void SetPlaylistStartTimeFromPlayback(int index)
@@ -4210,6 +4661,8 @@ internal sealed class MainForm : Form
             {
                 _playlistItems[i].PlayEnabled = false;
                 _playlistItems[i].LoopEnabled = false;
+                _playlistItems[i].Transition = PlaylistTransitionCut;
+                _playlistItems[i].TransitionDuration = DefaultTransitionDuration;
                 _playlistItems[i].Status = PlaylistStatusEnd;
             }
             else if (!File.Exists(_playlistItems[i].FullPath))
@@ -4533,6 +4986,8 @@ internal sealed class MainForm : Form
                 isEndMarker ? "--" : item.TcOut.HasValue ? FormatPlaylistTime(item.TcOut.Value) : "--",
                 !isEndMarker && duration.HasValue ? FormatPlaylistTime(duration.Value) : "--",
                 !isEndMarker && item.LoopEnabled,
+                isEndMarker ? "--" : item.Transition,
+                isEndMarker || item.Transition == PlaylistTransitionCut ? "--" : FormatPlaylistTime(item.TransitionDuration),
                 endText,
                 item.FullPath);
 
@@ -4585,6 +5040,8 @@ internal sealed class MainForm : Form
             {
                 item.PlayEnabled = false;
                 item.LoopEnabled = false;
+                item.Transition = PlaylistTransitionCut;
+                item.TransitionDuration = DefaultTransitionDuration;
                 item.Status = PlaylistStatusEnd;
                 continue;
             }
@@ -4765,22 +5222,19 @@ internal sealed class MainForm : Form
     {
         var controlsEnabled = _mediaGrid.Enabled;
         var hasSelectedMedia = GetSelectedMediaGridPath() is not null || File.Exists(_inputPathBox.Text.Trim());
-        var canSeek = controlsEnabled &&
-            _positionBar.Enabled &&
-            !_playbackIsStillImage &&
-            !_playbackIsTestPattern &&
-            GetCurrentSeekDuration().HasValue;
 
-        _clipPreviousCueButton.Enabled = controlsEnabled && FindRelativeMediaGridRow(-1).HasValue;
-        _clipSeekBackButton.Enabled = canSeek;
+        _clipPreviousCueButton.Enabled = controlsEnabled && GetSelectedMediaGridPath() is not null;
         _clipPlayButton.Enabled = controlsEnabled && hasSelectedMedia;
-        _clipSeekForwardButton.Enabled = canSeek;
-        _clipPauseButton.Enabled = _isPlaying && !_isPaused;
-        _clipResumeButton.Enabled = _isPlaying && _isPaused;
+        var canTogglePauseResume = _isPlaying || _scrubPreviewMode || _nativeSeekPreviewMode;
+        var shouldShowResume = _isPaused || _scrubPreviewMode || _nativeSeekPreviewMode;
+        _clipPauseButton.Text = shouldShowResume ? "Resume" : "Pause";
+        SetButtonToolTip(_clipPauseButton, shouldShowResume ? "Resume playback." : "Pause playback.");
+        _clipPauseButton.Enabled = canTogglePauseResume;
         _clipStopButton.Enabled = _isPlaying || _scrubPreviewMode || _nativeSeekPreviewMode;
-        _clipNextCueButton.Enabled = controlsEnabled && FindRelativeMediaGridRow(1).HasValue;
-        _clipLoopButton.Enabled = controlsEnabled && hasSelectedMedia;
-        ApplyButtonTheme(_clipLoopButton, _darkMode);
+        var hasNextClip = FindRelativeMediaGridRow(1).HasValue;
+        _clipNextCueButton.Enabled = controlsEnabled && hasNextClip;
+        _clipPlayNextButton.Enabled = controlsEnabled && hasNextClip;
+        ApplyButtonTheme(_clipPauseButton, _darkMode);
     }
 
     private void UpdateTrimControls()
@@ -5320,6 +5774,19 @@ internal sealed class MainForm : Form
         await CueSelectedMediaGridAsync();
     }
 
+    private async Task PlayRelativeMediaGridItemAsync(int direction)
+    {
+        var index = FindRelativeMediaGridRow(direction);
+        if (!index.HasValue)
+        {
+            SetStatus(direction > 0 ? "No next clip" : "No previous clip", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        SelectMediaGridRow(index.Value, GetFirstVisibleMediaGridColumnIndex());
+        await PlaySelectedMediaGridAsync();
+    }
+
     private void ToggleClipLoopPlayback()
     {
         _clipLoopPlaybackEnabled = !_clipLoopPlaybackEnabled;
@@ -5778,6 +6245,7 @@ internal sealed class MainForm : Form
         _playbackPath = request.UseTestPattern ? null : request.InputPath;
         _playbackIsStillImage = !request.UseTestPattern && IsImageFile(request.InputPath);
         _playbackIsTestPattern = request.UseTestPattern;
+        UpdateLoadedFileLabel();
         _playbackDuration = null;
         _playbackDurationUnavailable = false;
 
@@ -5847,6 +6315,7 @@ internal sealed class MainForm : Form
         _playbackDurationUnavailable = false;
         _playbackIsStillImage = false;
         _playbackIsTestPattern = false;
+        UpdateLoadedFileLabel();
         ResetAudioMeters();
     }
 
@@ -7729,7 +8198,9 @@ internal sealed class MainForm : Form
         bool startPaused = false,
         TimeSpan? playDuration = null,
         TimeSpan? sourceDuration = null,
-        bool playLoop = false)
+        bool playLoop = false,
+        string? videoFilter = null,
+        string? audioFilter = null)
     {
         if (_isPlaying)
         {
@@ -7741,7 +8212,7 @@ internal sealed class MainForm : Form
         {
             var previewOnly = PreviewOnlyMode;
             var pcAudio = PcAudioMode;
-            var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration, playLoop);
+            var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration, playLoop, videoFilter, audioFilter);
             var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
             request = _deckLink.ApplyModeDefaults(request, selectedMode);
             var commandText = _sdkPlayer.FormatDecoderCommand(
@@ -7991,7 +8462,9 @@ internal sealed class MainForm : Form
         bool useTestPattern,
         TimeSpan startOffset,
         TimeSpan? playDuration = null,
-        bool playLoop = false)
+        bool playLoop = false,
+        string? videoFilter = null,
+        string? audioFilter = null)
     {
         var inputPath = _inputPathBox.Text.Trim();
         if (!useTestPattern && string.IsNullOrWhiteSpace(inputPath))
@@ -8071,8 +8544,8 @@ internal sealed class MainForm : Form
             duplexMode,
             linkMode,
             levelA,
-            VideoFilter: null,
-            AudioFilter: null,
+            VideoFilter: videoFilter,
+            AudioFilter: audioFilter,
             loopPlayback,
             useTestPattern || isStillImage,
             selectedMode?.IsInterlaced == true,
@@ -8545,9 +9018,18 @@ internal sealed class MainForm : Form
 
         public string? TimelineStart { get; set; }
 
+        public string? Transition { get; set; }
+
+        public string? TransitionDuration { get; set; }
+
         public bool PlayEnabled { get; set; } = true;
 
         public bool LoopEnabled { get; set; }
+    }
+
+    private sealed record PlaylistTransitionFilters(string? VideoFilter, string? AudioFilter)
+    {
+        public static readonly PlaylistTransitionFilters Empty = new(null, null);
     }
 
     private sealed class PlaylistItem
@@ -8568,6 +9050,10 @@ internal sealed class MainForm : Form
         public TimeSpan? SourceDuration { get; init; }
 
         public TimeSpan? TimelineStartOverride { get; set; }
+
+        public string Transition { get; set; } = PlaylistTransitionCut;
+
+        public TimeSpan TransitionDuration { get; set; } = DefaultTransitionDuration;
 
         public bool PlayEnabled { get; set; } = true;
 
@@ -8606,6 +9092,8 @@ internal sealed class MainForm : Form
                 TcOut = TcOut,
                 SourceDuration = SourceDuration,
                 TimelineStartOverride = TimelineStartOverride,
+                Transition = Transition,
+                TransitionDuration = TransitionDuration,
                 PlayEnabled = PlayEnabled,
                 LoopEnabled = LoopEnabled,
                 Status = Status,

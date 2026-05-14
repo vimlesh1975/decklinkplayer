@@ -791,8 +791,15 @@ internal sealed class DeckLinkSdkPlayer
         args.Add("-map");
         args.Add("0:a:0");
         args.Add("-vn");
+        var audioFilters = new List<string>();
+        if (!string.IsNullOrWhiteSpace(request.AudioFilter))
+        {
+            audioFilters.Add(request.AudioFilter);
+        }
+
+        audioFilters.Add("aresample=async=1000:first_pts=0");
         args.Add("-af");
-        args.Add("aresample=async=1000:first_pts=0");
+        args.Add(string.Join(",", audioFilters));
         args.Add("-ac");
         args.Add(request.AudioChannels.ToString(CultureInfo.InvariantCulture));
         args.Add("-ar");
@@ -815,6 +822,11 @@ internal sealed class DeckLinkSdkPlayer
         if (!string.IsNullOrWhiteSpace(request.FrameRate))
         {
             filters.Add($"fps={NormalizeRateString(request.FrameRate)}:start_time=0");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.VideoFilter))
+        {
+            filters.Add(request.VideoFilter);
         }
 
         filters.Add("format=uyvy422");
