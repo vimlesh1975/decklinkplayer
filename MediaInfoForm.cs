@@ -108,16 +108,9 @@ internal sealed class MediaInfoForm : Form
 
         _grid.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "Section",
-            HeaderText = "Section",
-            Width = 150,
-            SortMode = DataGridViewColumnSortMode.NotSortable,
-        });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn
-        {
             Name = "Property",
             HeaderText = "Property",
-            Width = 230,
+            Width = 280,
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
         _grid.Columns.Add(new DataGridViewTextBoxColumn
@@ -128,7 +121,7 @@ internal sealed class MediaInfoForm : Form
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
 
-        _grid.Rows.Add("MediaInfo", "Status", "Loading...");
+        _grid.Rows.Add("Status", "Loading...");
         root.Controls.Add(_grid, 0, 1);
     }
 
@@ -172,19 +165,39 @@ internal sealed class MediaInfoForm : Form
 
             if (rows.Count == 0)
             {
-                _grid.Rows.Add("MediaInfo", "Status", "No information returned.");
+                AddSectionHeader("MediaInfo");
+                _grid.Rows.Add("Status", "No information returned.");
                 return;
             }
 
+            string? currentSection = null;
             foreach (var row in rows)
             {
-                _grid.Rows.Add(row.Section, row.Property, row.Value);
+                if (!string.Equals(currentSection, row.Section, StringComparison.Ordinal))
+                {
+                    currentSection = row.Section;
+                    AddSectionHeader(currentSection);
+                }
+
+                _grid.Rows.Add(row.Property, row.Value);
             }
         }
         finally
         {
             _grid.ResumeLayout();
         }
+    }
+
+    private void AddSectionHeader(string section)
+    {
+        var rowIndex = _grid.Rows.Add(section, string.Empty);
+        var row = _grid.Rows[rowIndex];
+        row.DefaultCellStyle.BackColor = Color.FromArgb(38, 44, 50);
+        row.DefaultCellStyle.ForeColor = Color.FromArgb(239, 244, 248);
+        row.DefaultCellStyle.SelectionBackColor = Color.FromArgb(38, 44, 50);
+        row.DefaultCellStyle.SelectionForeColor = Color.FromArgb(239, 244, 248);
+        row.DefaultCellStyle.Font = new Font(_grid.Font, FontStyle.Bold);
+        row.Height = 28;
     }
 
     private void CenterNearOwner()

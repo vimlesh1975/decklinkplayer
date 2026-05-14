@@ -19,6 +19,8 @@ internal sealed class MainForm : Form
     private const string PlaylistStatusPlaying = "PLAYING";
     private const string PlaylistStatusPlayed = "PLAYED";
     private const string PlaylistStatusMissing = "MISSING";
+    private const string PlaylistStatusEnd = "END";
+    private const string PlaylistEndMarkerText = "END";
     private const uint PdhFormatDouble = 0x00000200;
     private const int PdhSuccess = 0;
     private const double CpuSmoothingFactor = 0.35;
@@ -26,7 +28,7 @@ internal sealed class MainForm : Form
     private const int FixedClientHeight = 1080;
     private const int RootPadding = 16;
     private const int HeaderRowHeight = 64;
-    private const int ActionRowHeight = 140;
+    private const int ActionRowHeight = 166;
     private const int RemainingTimeRowHeight = 32;
     private const int CurrentTimeRowHeight = 32;
     private const int ToggleRowHeight = 44;
@@ -59,26 +61,50 @@ internal sealed class MainForm : Form
     private readonly TextBox _inputPathBox = new();
     private readonly TextBox _mediaRootPathBox = new();
     private readonly TextBox _mediaSearchBox = new();
+    private readonly CheckBox _darkModeCheckBox = new();
     private readonly TreeView _mediaTree = new();
     private readonly DataGridView _mediaGrid = new();
     private readonly ContextMenuStrip _mediaGridContextMenu = new();
     private readonly ToolStripMenuItem _mediaGridMenuFileInfo = new("File Info");
     private readonly DataGridView _playlistGrid = new();
     private readonly ContextMenuStrip _playlistContextMenu = new();
-    private readonly ToolStripMenuItem _playlistMenuPlay = new("Play");
-    private readonly ToolStripMenuItem _playlistMenuPause = new("Pause");
-    private readonly ToolStripMenuItem _playlistMenuCue = new("Cue");
-    private readonly ToolStripMenuItem _playlistMenuCueNext = new("Cue Next");
-    private readonly ToolStripMenuItem _playlistMenuPlayNext = new("Play Next");
+    private readonly ToolStripMenuItem _playlistMenuStop = new("Stop F1");
+    private readonly ToolStripMenuItem _playlistMenuPlay = new("Play F2");
+    private readonly ToolStripMenuItem _playlistMenuCue = new("Cue F3");
+    private readonly ToolStripMenuItem _playlistMenuPause = new("Pause F4");
+    private readonly ToolStripMenuItem _playlistMenuResume = new("Resume F4");
+    private readonly ToolStripMenuItem _playlistMenuCueNext = new("Cue Next F5");
+    private readonly ToolStripMenuItem _playlistMenuPlayNext = new("Play Next F6");
+    private readonly ToolStripMenuItem _playlistMenuInsertBlank = new("Insert Blank");
+    private readonly ToolStripMenuItem _playlistMenuDelete = new("Delete");
+    private readonly ToolStripMenuItem _playlistMenuCopy = new("Copy");
+    private readonly ToolStripMenuItem _playlistMenuPaste = new("Paste");
+    private readonly ToolStripMenuItem _playlistMenuMoveUp = new("Move Up");
+    private readonly ToolStripMenuItem _playlistMenuMoveDown = new("Move Down");
+    private readonly ToolStripMenuItem _playlistMenuPlayInVlc = new("Play in VLC");
+    private readonly ToolStripMenuItem _playlistMenuCheckFiles = new("Check Files");
+    private readonly ToolStripMenuItem _playlistMenuOpenInTrimmer = new("Open in Trimmer");
+    private readonly ToolStripMenuItem _playlistMenuFileInfo = new("File information");
+    private readonly ToolStripMenuItem _playlistMenuInsertDecklink = new("Insert Decklink");
+    private readonly ToolStripMenuItem _playlistMenuShowLiveDecklink = new("Show Live Decklink");
+    private readonly ToolStripMenuItem _playlistMenuRefreshThumbnail = new("Refresh Thumbnail");
+    private readonly ToolStripMenuItem _playlistMenuInsertEnd = new("Insert End");
+    private readonly ToolStripMenuItem _playlistMenuSelectAll = new("Select All");
+    private readonly ToolStripMenuItem _playlistMenuDeselectAll = new("De Select All");
+    private readonly ToolStripMenuItem _playlistMenuSetStartTime = new("Set Start Time Accordinging To CurrentRow");
+    private readonly ToolStripMenuItem _playlistMenuInsertPlaylist = new("Insert Playlist");
+    private readonly ToolStripMenuItem _playlistMenuInsertFilter = new("Insert Filter");
+    private readonly ToolStripMenuItem _playlistMenuChangeAllTransition = new("Change All Transition");
+    private readonly ToolStripMenuItem _playlistMenuPlayInFfplay = new("Play in ffplay");
     private readonly ToolStripMenuItem _playlistMenuCuePrevious = new("Cue Prev");
     private readonly ToolStripMenuItem _playlistMenuPlayPrevious = new("Play Prev");
-    private readonly ToolStripMenuItem _playlistMenuFileInfo = new("File Info");
     private readonly Button _addToPlaylistButton = new();
     private readonly Button _removePlaylistItemButton = new();
     private readonly Button _movePlaylistItemUpButton = new();
     private readonly Button _movePlaylistItemDownButton = new();
     private readonly Button _playPlaylistItemButton = new();
     private readonly Button _clearPlaylistButton = new();
+    private readonly Button _setPlaylistStartTimeButton = new();
     private readonly CheckBox _autoPlayPlaylistCheckBox = new();
     private readonly ComboBox _deviceBox = new();
     private readonly ComboBox _modeBox = new();
@@ -115,6 +141,16 @@ internal sealed class MainForm : Form
     private readonly Button _nextCueButton = new();
     private readonly Button _markInButton = new();
     private readonly Button _markOutButton = new();
+    private readonly TextBox _markInValueBox = new();
+    private readonly TextBox _markOutValueBox = new();
+    private readonly Button _goToInButton = new();
+    private readonly Button _playFromInButton = new();
+    private readonly Button _playInToOutButton = new();
+    private readonly Button _goToTcButton = new();
+    private readonly TextBox _goToTcBox = new();
+    private readonly Button _goToOutButton = new();
+    private readonly NumericUpDown _lastSecondsBox = new();
+    private readonly Button _playLastSecondsButton = new();
     private readonly Button _addTrimmedToPlaylistButton = new();
     private readonly TextBox _logBox = new();
     private readonly PictureBox _appPreviewBox = new();
@@ -150,6 +186,7 @@ internal sealed class MainForm : Form
     private CancellationTokenSource? _scrubPreviewDecodeCancellation;
     private Task? _scrubPreviewStartTask;
     private readonly List<PlaylistItem> _playlistItems = new();
+    private PlaylistItem? _playlistClipboardItem;
     private TimeSpan? _selectedMediaDuration;
     private TimeSpan? _playbackDuration;
     private DateTime? _playbackStartedAt;
@@ -194,6 +231,7 @@ internal sealed class MainForm : Form
     private bool _playbackDurationUnavailable;
     private bool _playbackIsStillImage;
     private bool _playbackIsTestPattern;
+    private bool _darkMode = true;
     private int _appPreviewFramePending;
     private ulong _lastSystemIdleTime;
     private ulong _lastSystemKernelTime;
@@ -215,6 +253,7 @@ internal sealed class MainForm : Form
         BackColor = Color.FromArgb(22, 25, 29);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         DoubleBuffered = true;
+        KeyPreview = true;
         SetStyle(
             ControlStyles.AllPaintingInWmPaint |
             ControlStyles.UserPaint |
@@ -237,6 +276,7 @@ internal sealed class MainForm : Form
         _durationProbeTimer.Tick += DurationProbeTimer_Tick;
         _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
+        KeyDown += MainForm_KeyDown;
         InitializeCpuUsageSampling();
         _cpuUsageTimer.Tick += (_, _) => UpdateCpuUsageLabel();
         _cpuUsageTimer.Start();
@@ -267,6 +307,45 @@ internal sealed class MainForm : Form
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
             SaveAppSettings();
         };
+    }
+
+    private async void MainForm_KeyDown(object? sender, KeyEventArgs e)
+    {
+        switch (e.KeyCode)
+        {
+            case Keys.F1:
+                e.Handled = true;
+                StopPlayback();
+                break;
+            case Keys.F2:
+                e.Handled = true;
+                await PlaySelectedPlaylistItemAsync();
+                break;
+            case Keys.F3:
+                e.Handled = true;
+                CueSelectedPlaylistItem();
+                break;
+            case Keys.F4:
+                e.Handled = true;
+                if (_isPaused)
+                {
+                    ResumePlayback();
+                }
+                else
+                {
+                    PausePlayback();
+                }
+
+                break;
+            case Keys.F5:
+                e.Handled = true;
+                CueRelativePlaylistItem(1);
+                break;
+            case Keys.F6:
+                e.Handled = true;
+                await PlayRelativePlaylistItemAsync(1);
+                break;
+        }
     }
 
     private static string GetExecutableWindowTitle()
@@ -515,6 +594,20 @@ internal sealed class MainForm : Form
         _statusLabel.ForeColor = Color.FromArgb(130, 210, 164);
         _statusLabel.Location = new Point(332, 18);
 
+        _darkModeCheckBox.Text = "Dark Mode";
+        _darkModeCheckBox.Checked = true;
+        _darkModeCheckBox.AutoSize = false;
+        _darkModeCheckBox.Size = new Size(124, 28);
+        _darkModeCheckBox.Location = new Point(1474, 18);
+        _darkModeCheckBox.TextAlign = ContentAlignment.MiddleLeft;
+        _darkModeCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
+        _darkModeCheckBox.BackColor = BackColor;
+        _darkModeCheckBox.CheckedChanged += (_, _) =>
+        {
+            ApplyTheme(_darkModeCheckBox.Checked);
+            SetStatus(_darkModeCheckBox.Checked ? "Dark mode" : "Light mode", Color.FromArgb(130, 210, 164));
+        };
+
         _cpuUsageLabel.Text = "PC CPU 0%";
         _cpuUsageLabel.AutoSize = false;
         _cpuUsageLabel.Width = 260;
@@ -526,6 +619,7 @@ internal sealed class MainForm : Form
 
         panel.Controls.Add(title);
         panel.Controls.Add(_statusLabel);
+        panel.Controls.Add(_darkModeCheckBox);
         panel.Controls.Add(_cpuUsageLabel);
         return panel;
     }
@@ -685,10 +779,11 @@ internal sealed class MainForm : Form
         ConfigurePlaylistButton(_movePlaylistItemDownButton, "Down", Color.FromArgb(52, 67, 82), MoveSelectedPlaylistItemDown);
         ConfigurePlaylistButton(_removePlaylistItemButton, "Remove", Color.FromArgb(149, 64, 58), RemoveSelectedPlaylistItem);
         ConfigurePlaylistButton(_clearPlaylistButton, "Clear", Color.FromArgb(52, 67, 82), ClearPlaylist);
-        _autoPlayPlaylistCheckBox.Text = "Auto next";
-        _autoPlayPlaylistCheckBox.Checked = false;
+        ConfigurePlaylistButton(_setPlaylistStartTimeButton, "Set Start", Color.FromArgb(52, 67, 82), SetSelectedPlaylistStartTime);
+        _autoPlayPlaylistCheckBox.Text = "Auto repeat";
+        _autoPlayPlaylistCheckBox.Checked = true;
         _autoPlayPlaylistCheckBox.AutoSize = false;
-        _autoPlayPlaylistCheckBox.Size = new Size(94, 28);
+        _autoPlayPlaylistCheckBox.Size = new Size(108, 28);
         _autoPlayPlaylistCheckBox.Margin = new Padding(4, 0, 0, 0);
         _autoPlayPlaylistCheckBox.TextAlign = ContentAlignment.MiddleLeft;
         _autoPlayPlaylistCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
@@ -702,6 +797,7 @@ internal sealed class MainForm : Form
                 _movePlaylistItemDownButton,
                 _removePlaylistItemButton,
                 _clearPlaylistButton,
+                _setPlaylistStartTimeButton,
                 _autoPlayPlaylistCheckBox,
             ]);
 
@@ -711,7 +807,7 @@ internal sealed class MainForm : Form
     private static void ConfigurePlaylistButton(Button button, string text, Color color, Action action)
     {
         button.Text = text;
-        button.Width = text.Length > 5 ? 64 : 52;
+        button.Width = text.Length > 8 ? 78 : text.Length > 5 ? 64 : 52;
         button.Height = 28;
         button.Margin = new Padding(0, 0, 6, 0);
         StyleButton(button, color);
@@ -1014,6 +1110,44 @@ internal sealed class MainForm : Form
         button.Click += (_, _) => action();
     }
 
+    private void ConfigureSeekCommandButton(Button button, string text, int width, Func<Task> action)
+    {
+        button.Text = text;
+        button.Margin = new Padding(0, 0, 4, 0);
+        StyleButton(button, Color.FromArgb(52, 67, 82));
+        button.Width = width;
+        button.Height = 29;
+        button.Enabled = false;
+        button.Click += async (_, _) => await RunSeekSafelyAsync(action);
+    }
+
+    private static void ConfigureSeekTextBox(TextBox textBox, int width, bool readOnly)
+    {
+        textBox.Width = width;
+        textBox.Height = 29;
+        textBox.Margin = new Padding(0, 0, 4, 0);
+        textBox.BorderStyle = BorderStyle.FixedSingle;
+        textBox.BackColor = readOnly ? Color.FromArgb(13, 16, 19) : Color.FromArgb(20, 24, 28);
+        textBox.ForeColor = Color.FromArgb(232, 237, 240);
+        textBox.TextAlign = HorizontalAlignment.Center;
+        textBox.ReadOnly = readOnly;
+        textBox.TabStop = !readOnly;
+    }
+
+    private static void ConfigureSeekNumberBox(NumericUpDown input, int width)
+    {
+        input.Width = width;
+        input.Height = 29;
+        input.Margin = new Padding(0, 0, 4, 0);
+        input.Minimum = 1;
+        input.Maximum = 999;
+        input.Value = 5;
+        input.DecimalPlaces = 0;
+        input.BackColor = Color.FromArgb(20, 24, 28);
+        input.ForeColor = Color.FromArgb(232, 237, 240);
+        input.TextAlign = HorizontalAlignment.Center;
+    }
+
     private void ConfigureTransportActionButton(Button button, string text, int width, Color color, Func<Task> action)
     {
         button.Text = text;
@@ -1062,9 +1196,20 @@ internal sealed class MainForm : Form
         ConfigureTransportActionButton(_previousPlayButton, "Prev Play", 90, Color.FromArgb(63, 96, 135), () => PlayRelativePlaylistItemAsync(-1));
         ConfigureTransportActionButton(_nextPlayButton, "Next Play", 90, Color.FromArgb(63, 96, 135), () => PlayRelativePlaylistItemAsync(1));
         ConfigureTrimButton(_nextCueButton, "Next Cue", 86, Color.FromArgb(52, 67, 82), () => CueRelativePlaylistItem(1));
-        ConfigureTrimButton(_markInButton, "Mark In", 78, Color.FromArgb(52, 67, 82), MarkTrimIn);
-        ConfigureTrimButton(_markOutButton, "Mark Out", 84, Color.FromArgb(52, 67, 82), MarkTrimOut);
+        ConfigureTrimButton(_markInButton, "IN", 42, Color.FromArgb(52, 67, 82), MarkTrimIn);
+        ConfigureTrimButton(_markOutButton, "Out", 48, Color.FromArgb(52, 67, 82), MarkTrimOut);
         ConfigureTrimButton(_addTrimmedToPlaylistButton, "Add Trimmed", 118, Color.FromArgb(39, 125, 87), AddTrimmedClipToPlaylist);
+        ConfigureSeekTextBox(_markInValueBox, 66, readOnly: true);
+        ConfigureSeekTextBox(_markOutValueBox, 66, readOnly: true);
+        ConfigureSeekCommandButton(_goToInButton, "Go to IN", 70, GoToInAsync);
+        ConfigureSeekCommandButton(_playFromInButton, "Play from IN", 98, PlayFromInAsync);
+        ConfigureSeekCommandButton(_playInToOutButton, "Play IN to OUT", 108, PlayInToOutAsync);
+        ConfigureSeekCommandButton(_goToTcButton, "GoTo TC", 72, GoToTimecodeAsync);
+        ConfigureSeekTextBox(_goToTcBox, 108, readOnly: false);
+        _goToTcBox.Text = "00:00:00:00";
+        ConfigureSeekNumberBox(_lastSecondsBox, 52);
+        ConfigureSeekCommandButton(_playLastSecondsButton, "Play Last Sec", 104, PlayLastSecondsAsync);
+        ConfigureSeekCommandButton(_goToOutButton, "Go to OUT", 78, GoToOutAsync);
 
         panel.Controls.Add(BuildSeekActionGroup(
             SeekGroupWidth,
@@ -1079,8 +1224,6 @@ internal sealed class MainForm : Form
             {
                 _stopButton,
                 _pauseResumeButton,
-                _markInButton,
-                _markOutButton,
                 _addTrimmedToPlaylistButton,
             },
             new Control[]
@@ -1192,12 +1335,11 @@ internal sealed class MainForm : Form
     {
         var leftWidth = MeasureControlsWidth(negativeControls);
         var transportWidth = MeasureControlsWidth(transportControls);
-        var playlistWidth = MeasureControlsWidth(playlistControls);
         var rightWidth = MeasureControlsWidth(positiveControls);
         var panel = new Panel
         {
             Width = width,
-            Height = 126,
+            Height = 152,
             Margin = new Padding(0),
             BackColor = Color.FromArgb(30, 35, 40),
             Padding = new Padding(8, 3, 8, 5),
@@ -1208,12 +1350,9 @@ internal sealed class MainForm : Form
         seekPanel.Size = new Size(width - 16, 35);
         seekPanel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
 
-        var playlistPanel = BuildSeekButtonPanel(playlistControls, playlistWidth);
-        playlistPanel.Location = new Point(Math.Max(0, (width - 16 - playlistWidth) / 2), 47);
-
-        var buttonPanel = new Panel
+        var transportRow = new Panel
         {
-            Location = new Point(8, 87),
+            Location = new Point(8, 42),
             Size = new Size(width - 16, 31),
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -1229,18 +1368,52 @@ internal sealed class MainForm : Form
         var rightPanel = BuildSeekButtonPanel(positiveControls, rightWidth);
         rightPanel.Location = new Point(leftWidth + transportWidth, 0);
 
-        var controlsWidth = leftWidth + transportWidth + SeekPositiveGroupGap + rightWidth;
-        var centeredX = Math.Max(0, (buttonPanel.Width - controlsWidth) / 2);
-        leftPanel.Location = new Point(centeredX, 0);
-        transportPanel.Location = new Point(centeredX + leftWidth, 0);
-        rightPanel.Location = new Point(centeredX + leftWidth + transportWidth + SeekPositiveGroupGap, 0);
+        var markInPanel = BuildSeekButtonPanel([_markInButton, _markInValueBox], MeasureControlsWidth([_markInButton, _markInValueBox]));
+        var markOutPanel = BuildSeekButtonPanel([_markOutValueBox, _markOutButton], MeasureControlsWidth([_markOutValueBox, _markOutButton]));
+        var controlsWidth = markInPanel.Width + leftWidth + transportWidth + SeekPositiveGroupGap + rightWidth + markOutPanel.Width;
+        var centeredX = Math.Max(0, (transportRow.Width - controlsWidth) / 2);
+        markInPanel.Location = new Point(centeredX, 0);
+        leftPanel.Location = new Point(markInPanel.Right, 0);
+        transportPanel.Location = new Point(leftPanel.Right, 0);
+        rightPanel.Location = new Point(transportPanel.Right + SeekPositiveGroupGap, 0);
+        markOutPanel.Location = new Point(rightPanel.Right, 0);
 
-        buttonPanel.Controls.Add(leftPanel);
-        buttonPanel.Controls.Add(transportPanel);
-        buttonPanel.Controls.Add(rightPanel);
+        transportRow.Controls.Add(markInPanel);
+        transportRow.Controls.Add(leftPanel);
+        transportRow.Controls.Add(transportPanel);
+        transportRow.Controls.Add(rightPanel);
+        transportRow.Controls.Add(markOutPanel);
+
+        var commandControls = new Control[]
+        {
+            _goToInButton,
+            _playFromInButton,
+            _playInToOutButton,
+            _goToTcButton,
+            _goToTcBox,
+            _goToOutButton,
+        };
+        var playlistCommandControls = new Control[]
+        {
+            _previousCueButton,
+            _previousPlayButton,
+            _lastSecondsBox,
+            _nextPlayButton,
+            _playLastSecondsButton,
+            _nextCueButton,
+        };
+        var commandWidth = MeasureControlsWidth(commandControls);
+        var commandPanel = BuildSeekButtonPanel(commandControls, commandWidth);
+        commandPanel.Location = new Point(Math.Max(0, (width - 16 - commandWidth) / 2), 78);
+
+        var playlistCommandWidth = MeasureControlsWidth(playlistCommandControls);
+        var playlistCommandPanel = BuildSeekButtonPanel(playlistCommandControls, playlistCommandWidth);
+        playlistCommandPanel.Location = new Point(Math.Max(0, (width - 16 - playlistCommandWidth) / 2), 116);
+
         panel.Controls.Add(seekPanel);
-        panel.Controls.Add(playlistPanel);
-        panel.Controls.Add(buttonPanel);
+        panel.Controls.Add(transportRow);
+        panel.Controls.Add(commandPanel);
+        panel.Controls.Add(playlistCommandPanel);
         return panel;
     }
 
@@ -1568,6 +1741,284 @@ internal sealed class MainForm : Form
         checkBox.Margin = new Padding(0, 4, 22, 0);
     }
 
+    private void ApplyTheme(bool dark)
+    {
+        _darkMode = dark;
+        BackColor = ThemeBackColor(dark);
+        ApplyThemeToControl(this, dark);
+        ApplyDataGridTheme(_playlistGrid, dark);
+        ApplyDataGridTheme(_mediaGrid, dark);
+        ApplyTreeTheme(_mediaTree, dark);
+        ApplyContextMenuTheme();
+
+        var selectedIndex = GetSelectedPlaylistIndex();
+        RefreshPlaylistGrid(selectedIndex);
+        UpdateTrimControls();
+    }
+
+    private void ApplyThemeToControl(Control control, bool dark)
+    {
+        if (ReferenceEquals(control, this))
+        {
+            control.BackColor = ThemeBackColor(dark);
+            control.ForeColor = ThemeTextColor(dark);
+        }
+
+        switch (control)
+        {
+            case DataGridView:
+                break;
+            case TreeView tree:
+                ApplyTreeTheme(tree, dark);
+                break;
+            case Button button:
+                ApplyButtonTheme(button, dark);
+                break;
+            case TextBox textBox:
+                ApplyInputTheme(textBox, dark);
+                break;
+            case ComboBox comboBox:
+                ApplyInputTheme(comboBox, dark);
+                comboBox.FlatStyle = FlatStyle.Flat;
+                break;
+            case NumericUpDown numeric:
+                ApplyInputTheme(numeric, dark);
+                break;
+            case CheckBox checkBox:
+                checkBox.BackColor = ThemePanelColor(dark);
+                checkBox.ForeColor = ThemeTextColor(dark);
+                break;
+            case Label label:
+                ApplyLabelTheme(label, dark);
+                break;
+            case PictureBox:
+                control.BackColor = Color.Black;
+                break;
+            default:
+                control.BackColor = ReferenceEquals(control, this)
+                    ? ThemeBackColor(dark)
+                    : control.Controls.Contains(_appPreviewBox)
+                    ? Color.Black
+                    : ThemePanelColor(dark);
+                control.ForeColor = ThemeTextColor(dark);
+                break;
+        }
+
+        foreach (Control child in control.Controls)
+        {
+            ApplyThemeToControl(child, dark);
+        }
+    }
+
+    private void ApplyLabelTheme(Label label, bool dark)
+    {
+        if (ReferenceEquals(label, _statusLabel))
+        {
+            label.BackColor = ThemePanelColor(dark);
+            return;
+        }
+
+        if (ReferenceEquals(label, _durationLabel) || ReferenceEquals(label, _currentTimeLabel))
+        {
+            label.BackColor = ThemePanelColor(dark);
+            label.ForeColor = ThemeTextColor(dark);
+            return;
+        }
+
+        label.BackColor = ThemePanelColor(dark);
+        label.ForeColor = ReferenceEquals(label, _cpuUsageLabel)
+            ? ThemeTextColor(dark)
+            : ThemeMutedTextColor(dark);
+    }
+
+    private void ApplyInputTheme(Control input, bool dark)
+    {
+        input.BackColor = dark ? Color.FromArgb(20, 24, 28) : Color.White;
+        input.ForeColor = dark ? Color.FromArgb(232, 237, 240) : Color.FromArgb(24, 29, 34);
+    }
+
+    private void ApplyButtonTheme(Button button, bool dark)
+    {
+        var accent = GetButtonAccentColor(button, dark);
+        button.BackColor = accent.BackColor;
+        button.ForeColor = accent.ForeColor;
+        button.FlatAppearance.BorderSize = dark ? 0 : 1;
+        button.FlatAppearance.BorderColor = dark ? accent.BackColor : Color.FromArgb(176, 186, 196);
+    }
+
+    private (Color BackColor, Color ForeColor) GetButtonAccentColor(Button button, bool dark)
+    {
+        var isDanger = ReferenceEquals(button, _stopButton) || ReferenceEquals(button, _removePlaylistItemButton);
+        var isGo = ReferenceEquals(button, _addToPlaylistButton) ||
+            ReferenceEquals(button, _addTrimmedToPlaylistButton);
+        var isPlay = ReferenceEquals(button, _playPlaylistItemButton) ||
+            ReferenceEquals(button, _previousPlayButton) ||
+            ReferenceEquals(button, _nextPlayButton) ||
+            ReferenceEquals(button, _browseMediaRootButton);
+        var isPause = ReferenceEquals(button, _pauseResumeButton);
+
+        if (dark)
+        {
+            if (isDanger) return (Color.FromArgb(149, 64, 58), Color.White);
+            if (isGo) return (Color.FromArgb(39, 125, 87), Color.White);
+            if (isPlay) return (Color.FromArgb(63, 96, 135), Color.White);
+            if (isPause) return (Color.FromArgb(183, 126, 46), Color.White);
+            return (Color.FromArgb(52, 67, 82), Color.White);
+        }
+
+        if (isDanger) return (Color.FromArgb(196, 83, 75), Color.White);
+        if (isGo) return (Color.FromArgb(40, 145, 97), Color.White);
+        if (isPlay) return (Color.FromArgb(55, 117, 178), Color.White);
+        if (isPause) return (Color.FromArgb(205, 143, 47), Color.White);
+        return (Color.FromArgb(225, 231, 237), Color.FromArgb(24, 29, 34));
+    }
+
+    private static void ApplyTreeTheme(TreeView tree, bool dark)
+    {
+        tree.BackColor = dark ? Color.FromArgb(13, 16, 19) : Color.White;
+        tree.ForeColor = dark ? Color.FromArgb(226, 234, 238) : Color.FromArgb(24, 29, 34);
+        tree.LineColor = dark ? Color.FromArgb(92, 103, 112) : Color.FromArgb(130, 140, 150);
+    }
+
+    private static void ApplyDataGridTheme(DataGridView grid, bool dark)
+    {
+        grid.BackgroundColor = dark ? Color.FromArgb(13, 16, 19) : Color.White;
+        grid.GridColor = dark ? Color.FromArgb(54, 61, 68) : Color.FromArgb(210, 218, 226);
+        grid.ColumnHeadersDefaultCellStyle.BackColor = dark ? Color.FromArgb(38, 44, 50) : Color.FromArgb(226, 232, 238);
+        grid.ColumnHeadersDefaultCellStyle.ForeColor = dark ? Color.FromArgb(236, 241, 244) : Color.FromArgb(24, 29, 34);
+        grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = grid.ColumnHeadersDefaultCellStyle.BackColor;
+        grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = grid.ColumnHeadersDefaultCellStyle.ForeColor;
+        grid.DefaultCellStyle.BackColor = dark ? Color.FromArgb(17, 20, 24) : Color.White;
+        grid.DefaultCellStyle.ForeColor = dark ? Color.FromArgb(226, 234, 238) : Color.FromArgb(24, 29, 34);
+        grid.DefaultCellStyle.SelectionBackColor = dark ? Color.FromArgb(32, 116, 190) : Color.FromArgb(62, 135, 210);
+        grid.DefaultCellStyle.SelectionForeColor = Color.White;
+        grid.AlternatingRowsDefaultCellStyle.BackColor = dark ? Color.FromArgb(29, 34, 39) : Color.FromArgb(245, 248, 251);
+    }
+
+    private void ApplyContextMenuTheme()
+    {
+        ApplyContextMenuTheme(_playlistContextMenu, _darkMode);
+        ApplyContextMenuTheme(_mediaGridContextMenu, _darkMode);
+    }
+
+    private static void ApplyContextMenuTheme(ContextMenuStrip menu, bool dark)
+    {
+        menu.RenderMode = ToolStripRenderMode.Professional;
+        menu.Renderer = new AppMenuRenderer(dark);
+        menu.BackColor = ThemeMenuBackColor(dark);
+        menu.ForeColor = ThemeTextColor(dark);
+        menu.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+        menu.ShowImageMargin = false;
+        menu.Padding = new Padding(2, 4, 2, 4);
+
+        foreach (ToolStripItem item in menu.Items)
+        {
+            ApplyToolStripItemTheme(item, dark);
+        }
+    }
+
+    private static void ApplyToolStripItemTheme(ToolStripItem item, bool dark)
+    {
+        item.BackColor = ThemeMenuBackColor(dark);
+        item.ForeColor = item.Enabled ? ThemeTextColor(dark) : ThemeDisabledTextColor(dark);
+        item.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+        item.Margin = new Padding(0);
+        item.Padding = new Padding(10, 2, 18, 2);
+
+        if (item is ToolStripMenuItem menuItem)
+        {
+            menuItem.DropDown.Renderer = new AppMenuRenderer(dark);
+            menuItem.DropDown.BackColor = ThemeMenuBackColor(dark);
+            menuItem.DropDown.ForeColor = ThemeTextColor(dark);
+            menuItem.DropDown.Padding = new Padding(2, 4, 2, 4);
+
+            if (menuItem.DropDown is ToolStripDropDownMenu dropDownMenu)
+            {
+                dropDownMenu.ShowImageMargin = false;
+            }
+
+            foreach (ToolStripItem child in menuItem.DropDownItems)
+            {
+                ApplyToolStripItemTheme(child, dark);
+            }
+        }
+    }
+
+    private static Color ThemeBackColor(bool dark) => dark ? Color.FromArgb(22, 25, 29) : Color.FromArgb(232, 236, 240);
+
+    private static Color ThemePanelColor(bool dark) => dark ? Color.FromArgb(30, 35, 40) : Color.FromArgb(246, 248, 250);
+
+    private static Color ThemeTextColor(bool dark) => dark ? Color.FromArgb(239, 244, 248) : Color.FromArgb(24, 29, 34);
+
+    private static Color ThemeMutedTextColor(bool dark) => dark ? Color.FromArgb(166, 179, 190) : Color.FromArgb(82, 93, 104);
+
+    private static Color ThemeDisabledTextColor(bool dark) => dark ? Color.FromArgb(102, 116, 126) : Color.FromArgb(146, 156, 166);
+
+    private static Color ThemeMenuBackColor(bool dark) => dark ? Color.FromArgb(17, 20, 24) : Color.White;
+
+    private static Color ThemeMenuHoverColor(bool dark) => dark ? Color.FromArgb(32, 116, 190) : Color.FromArgb(62, 135, 210);
+
+    private static Color ThemeMenuBorderColor(bool dark) => dark ? Color.FromArgb(54, 61, 68) : Color.FromArgb(190, 200, 210);
+
+    private sealed class AppMenuRenderer : ToolStripProfessionalRenderer
+    {
+        private readonly bool _dark;
+
+        public AppMenuRenderer(bool dark)
+        {
+            _dark = dark;
+        }
+
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            using var brush = new SolidBrush(ThemeMenuBackColor(_dark));
+            e.Graphics.FillRectangle(brush, e.AffectedBounds);
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            using var pen = new Pen(ThemeMenuBorderColor(_dark));
+            var bounds = new Rectangle(Point.Empty, e.ToolStrip.Size);
+            bounds.Width -= 1;
+            bounds.Height -= 1;
+            e.Graphics.DrawRectangle(pen, bounds);
+        }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            var color = e.Item.Selected && e.Item.Enabled
+                ? ThemeMenuHoverColor(_dark)
+                : ThemeMenuBackColor(_dark);
+            using var brush = new SolidBrush(color);
+            e.Graphics.FillRectangle(brush, new Rectangle(Point.Empty, e.Item.Size));
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            var item = e.Item;
+            e.TextColor = item.Enabled
+                ? item.Selected ? Color.White : ThemeTextColor(_dark)
+                : ThemeDisabledTextColor(_dark);
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+        {
+            var item = e.Item;
+            e.ArrowColor = item is not null && item.Enabled
+                ? item.Selected ? Color.White : ThemeTextColor(_dark)
+                : ThemeDisabledTextColor(_dark);
+            base.OnRenderArrow(e);
+        }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            using var pen = new Pen(ThemeMenuBorderColor(_dark));
+            var y = e.Item.Height / 2;
+            e.Graphics.DrawLine(pen, 8, y, e.Item.Width - 8, y);
+        }
+    }
+
     private void StyleMediaTree()
     {
         _mediaTree.Dock = DockStyle.Fill;
@@ -1705,6 +2156,7 @@ internal sealed class MainForm : Form
         _playlistGrid.CellDoubleClick -= PlaylistGrid_CellDoubleClick;
         _playlistGrid.KeyDown -= PlaylistGrid_KeyDown;
         _playlistGrid.CellMouseDown -= PlaylistGrid_CellMouseDown;
+        _playlistGrid.CellContentClick -= PlaylistGrid_CellContentClick;
         _playlistGrid.CurrentCellDirtyStateChanged -= PlaylistGrid_CurrentCellDirtyStateChanged;
         _playlistGrid.CellValueChanged -= PlaylistGrid_CellValueChanged;
         _playlistGrid.DataError -= PlaylistGrid_DataError;
@@ -1712,6 +2164,7 @@ internal sealed class MainForm : Form
         _playlistGrid.CellDoubleClick += PlaylistGrid_CellDoubleClick;
         _playlistGrid.KeyDown += PlaylistGrid_KeyDown;
         _playlistGrid.CellMouseDown += PlaylistGrid_CellMouseDown;
+        _playlistGrid.CellContentClick += PlaylistGrid_CellContentClick;
         _playlistGrid.CurrentCellDirtyStateChanged += PlaylistGrid_CurrentCellDirtyStateChanged;
         _playlistGrid.CellValueChanged += PlaylistGrid_CellValueChanged;
         _playlistGrid.DataError += PlaylistGrid_DataError;
@@ -1722,40 +2175,84 @@ internal sealed class MainForm : Form
     private void ConfigurePlaylistContextMenu()
     {
         _playlistContextMenu.Items.Clear();
-        _playlistMenuPlay.Click -= PlaylistMenuPlay_Click;
-        _playlistMenuPause.Click -= PlaylistMenuPause_Click;
-        _playlistMenuCue.Click -= PlaylistMenuCue_Click;
-        _playlistMenuCueNext.Click -= PlaylistMenuCueNext_Click;
-        _playlistMenuPlayNext.Click -= PlaylistMenuPlayNext_Click;
-        _playlistMenuCuePrevious.Click -= PlaylistMenuCuePrevious_Click;
-        _playlistMenuPlayPrevious.Click -= PlaylistMenuPlayPrevious_Click;
-        _playlistMenuFileInfo.Click -= PlaylistMenuFileInfo_Click;
         _playlistContextMenu.Opening -= PlaylistContextMenu_Opening;
 
-        _playlistMenuPlay.Click += PlaylistMenuPlay_Click;
-        _playlistMenuPause.Click += PlaylistMenuPause_Click;
-        _playlistMenuCue.Click += PlaylistMenuCue_Click;
-        _playlistMenuCueNext.Click += PlaylistMenuCueNext_Click;
-        _playlistMenuPlayNext.Click += PlaylistMenuPlayNext_Click;
-        _playlistMenuCuePrevious.Click += PlaylistMenuCuePrevious_Click;
-        _playlistMenuPlayPrevious.Click += PlaylistMenuPlayPrevious_Click;
-        _playlistMenuFileInfo.Click += PlaylistMenuFileInfo_Click;
+        RebindMenuClick(_playlistMenuStop, PlaylistMenuStop_Click);
+        RebindMenuClick(_playlistMenuPlay, PlaylistMenuPlay_Click);
+        RebindMenuClick(_playlistMenuCue, PlaylistMenuCue_Click);
+        RebindMenuClick(_playlistMenuPause, PlaylistMenuPause_Click);
+        RebindMenuClick(_playlistMenuResume, PlaylistMenuResume_Click);
+        RebindMenuClick(_playlistMenuCueNext, PlaylistMenuCueNext_Click);
+        RebindMenuClick(_playlistMenuPlayNext, PlaylistMenuPlayNext_Click);
+        RebindMenuClick(_playlistMenuDelete, PlaylistMenuDelete_Click);
+        RebindMenuClick(_playlistMenuCopy, PlaylistMenuCopy_Click);
+        RebindMenuClick(_playlistMenuPaste, PlaylistMenuPaste_Click);
+        RebindMenuClick(_playlistMenuMoveUp, PlaylistMenuMoveUp_Click);
+        RebindMenuClick(_playlistMenuMoveDown, PlaylistMenuMoveDown_Click);
+        RebindMenuClick(_playlistMenuPlayInVlc, PlaylistMenuPlayInVlc_Click);
+        RebindMenuClick(_playlistMenuCheckFiles, PlaylistMenuCheckFiles_Click);
+        RebindMenuClick(_playlistMenuOpenInTrimmer, PlaylistMenuOpenInTrimmer_Click);
+        RebindMenuClick(_playlistMenuFileInfo, PlaylistMenuFileInfo_Click);
+        RebindMenuClick(_playlistMenuInsertEnd, PlaylistMenuInsertEnd_Click);
+        RebindMenuClick(_playlistMenuSelectAll, PlaylistMenuSelectAll_Click);
+        RebindMenuClick(_playlistMenuDeselectAll, PlaylistMenuDeselectAll_Click);
+        RebindMenuClick(_playlistMenuSetStartTime, PlaylistMenuSetStartTime_Click);
+        RebindMenuClick(_playlistMenuPlayInFfplay, PlaylistMenuPlayInFfplay_Click);
         _playlistContextMenu.Opening += PlaylistContextMenu_Opening;
+
+        ConfigurePlaceholderSubmenu(_playlistMenuInsertDecklink, "DeckLink input insert is not implemented yet.");
+        ConfigurePlaceholderSubmenu(_playlistMenuShowLiveDecklink, "Live DeckLink preview is not implemented yet.");
+        ConfigurePlaceholderSubmenu(_playlistMenuInsertFilter, "Filter insert is not implemented yet.");
+        ConfigurePlaceholderSubmenu(_playlistMenuChangeAllTransition, "Transition changes are not implemented yet.");
+        _playlistMenuInsertBlank.Enabled = false;
+        _playlistMenuRefreshThumbnail.Enabled = false;
+        _playlistMenuInsertPlaylist.Enabled = false;
 
         _playlistContextMenu.Items.AddRange(
             [
+                _playlistMenuStop,
                 _playlistMenuPlay,
-                _playlistMenuPause,
-                new ToolStripSeparator(),
                 _playlistMenuCue,
+                _playlistMenuPause,
+                _playlistMenuResume,
                 _playlistMenuCueNext,
                 _playlistMenuPlayNext,
-                _playlistMenuCuePrevious,
-                _playlistMenuPlayPrevious,
-                new ToolStripSeparator(),
+                _playlistMenuInsertBlank,
+                _playlistMenuDelete,
+                _playlistMenuCopy,
+                _playlistMenuPaste,
+                _playlistMenuMoveUp,
+                _playlistMenuMoveDown,
+                _playlistMenuPlayInVlc,
+                _playlistMenuCheckFiles,
+                _playlistMenuOpenInTrimmer,
                 _playlistMenuFileInfo,
+                _playlistMenuInsertDecklink,
+                _playlistMenuShowLiveDecklink,
+                _playlistMenuRefreshThumbnail,
+                _playlistMenuInsertEnd,
+                _playlistMenuSelectAll,
+                _playlistMenuDeselectAll,
+                _playlistMenuSetStartTime,
+                _playlistMenuInsertPlaylist,
+                _playlistMenuInsertFilter,
+                _playlistMenuChangeAllTransition,
+                _playlistMenuPlayInFfplay,
             ]);
         _playlistGrid.ContextMenuStrip = _playlistContextMenu;
+        ApplyContextMenuTheme(_playlistContextMenu, _darkMode);
+    }
+
+    private static void RebindMenuClick(ToolStripMenuItem item, EventHandler handler)
+    {
+        item.Click -= handler;
+        item.Click += handler;
+    }
+
+    private static void ConfigurePlaceholderSubmenu(ToolStripMenuItem item, string text)
+    {
+        item.DropDownItems.Clear();
+        item.DropDownItems.Add(new ToolStripMenuItem(text) { Enabled = false });
     }
 
     private void PlaylistGrid_SelectionChanged(object? sender, EventArgs e)
@@ -1768,20 +2265,39 @@ internal sealed class MainForm : Form
         var selectedIndex = GetSelectedPlaylistIndex();
         var selectedCueable = selectedIndex.HasValue && IsPlaylistRowCueable(selectedIndex.Value);
         var hasNext = FindRelativePlaylistIndex(1, selectedIndex).HasValue;
-        var hasPrevious = FindRelativePlaylistIndex(-1, selectedIndex).HasValue;
+        var hasSelection = selectedIndex.HasValue &&
+            selectedIndex.Value >= 0 &&
+            selectedIndex.Value < _playlistItems.Count;
+        var selectedItem = hasSelection ? _playlistItems[selectedIndex!.Value] : null;
+        var selectedFileExists = selectedItem is not null && !selectedItem.IsEndMarker && File.Exists(selectedItem.FullPath);
+        var selectedCanSetStart = selectedIndex.HasValue && CanSetPlaylistStartTime(selectedIndex.Value);
 
+        _playlistMenuStop.Enabled = _isPlaying || _scrubPreviewMode || _nativeSeekPreviewMode;
         _playlistMenuPlay.Enabled = selectedCueable;
-        _playlistMenuPause.Text = _isPaused ? "Resume" : "Pause";
-        _playlistMenuPause.Enabled = _isPlaying;
         _playlistMenuCue.Enabled = selectedCueable;
+        _playlistMenuPause.Enabled = _isPlaying && !_isPaused;
+        _playlistMenuResume.Enabled = _isPlaying && _isPaused;
         _playlistMenuCueNext.Enabled = hasNext;
         _playlistMenuPlayNext.Enabled = hasNext;
-        _playlistMenuCuePrevious.Enabled = hasPrevious;
-        _playlistMenuPlayPrevious.Enabled = hasPrevious;
-        _playlistMenuFileInfo.Enabled = selectedIndex.HasValue &&
-            selectedIndex.Value >= 0 &&
-            selectedIndex.Value < _playlistItems.Count &&
-            File.Exists(_playlistItems[selectedIndex.Value].FullPath);
+        _playlistMenuDelete.Enabled = hasSelection;
+        _playlistMenuCopy.Enabled = hasSelection;
+        _playlistMenuPaste.Enabled = CanPastePlaylistItem();
+        _playlistMenuMoveUp.Enabled = selectedIndex.HasValue && selectedIndex.Value > 0;
+        _playlistMenuMoveDown.Enabled = selectedIndex.HasValue && selectedIndex.Value < _playlistItems.Count - 1;
+        _playlistMenuPlayInVlc.Enabled = selectedFileExists;
+        _playlistMenuCheckFiles.Enabled = _playlistItems.Count > 0;
+        _playlistMenuOpenInTrimmer.Enabled = selectedFileExists;
+        _playlistMenuFileInfo.Enabled = selectedFileExists;
+        _playlistMenuInsertEnd.Enabled = true;
+        _playlistMenuSelectAll.Enabled = _playlistItems.Count > 0;
+        _playlistMenuDeselectAll.Enabled = _playlistItems.Count > 0;
+        _playlistMenuSetStartTime.Enabled = selectedCanSetStart;
+        _playlistMenuPlayInFfplay.Enabled = selectedFileExists;
+    }
+
+    private void PlaylistMenuStop_Click(object? sender, EventArgs e)
+    {
+        StopPlayback();
     }
 
     private async void PlaylistMenuPlay_Click(object? sender, EventArgs e)
@@ -1789,9 +2305,14 @@ internal sealed class MainForm : Form
         await PlaySelectedPlaylistItemAsync();
     }
 
-    private async void PlaylistMenuPause_Click(object? sender, EventArgs e)
+    private void PlaylistMenuPause_Click(object? sender, EventArgs e)
     {
-        await TogglePauseResumePlaybackAsync();
+        PausePlayback();
+    }
+
+    private void PlaylistMenuResume_Click(object? sender, EventArgs e)
+    {
+        ResumePlayback();
     }
 
     private void PlaylistMenuCue_Click(object? sender, EventArgs e)
@@ -1819,6 +2340,46 @@ internal sealed class MainForm : Form
         await PlayRelativePlaylistItemAsync(-1, GetSelectedPlaylistIndex());
     }
 
+    private void PlaylistMenuDelete_Click(object? sender, EventArgs e)
+    {
+        RemoveSelectedPlaylistItem();
+    }
+
+    private void PlaylistMenuCopy_Click(object? sender, EventArgs e)
+    {
+        CopySelectedPlaylistItem();
+    }
+
+    private void PlaylistMenuPaste_Click(object? sender, EventArgs e)
+    {
+        PastePlaylistItem();
+    }
+
+    private void PlaylistMenuMoveUp_Click(object? sender, EventArgs e)
+    {
+        MoveSelectedPlaylistItemUp();
+    }
+
+    private void PlaylistMenuMoveDown_Click(object? sender, EventArgs e)
+    {
+        MoveSelectedPlaylistItemDown();
+    }
+
+    private void PlaylistMenuPlayInVlc_Click(object? sender, EventArgs e)
+    {
+        PlaySelectedPlaylistItemInExternalPlayer("vlc");
+    }
+
+    private void PlaylistMenuCheckFiles_Click(object? sender, EventArgs e)
+    {
+        CheckPlaylistFiles();
+    }
+
+    private void PlaylistMenuOpenInTrimmer_Click(object? sender, EventArgs e)
+    {
+        OpenSelectedPlaylistItemInTrimmer();
+    }
+
     private void PlaylistMenuFileInfo_Click(object? sender, EventArgs e)
     {
         var selectedIndex = GetSelectedPlaylistIndex();
@@ -1830,7 +2391,38 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (_playlistItems[selectedIndex.Value].IsEndMarker)
+        {
+            SetStatus("END marker has no media information", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
         OpenMediaInfoForm(_playlistItems[selectedIndex.Value].FullPath);
+    }
+
+    private void PlaylistMenuInsertEnd_Click(object? sender, EventArgs e)
+    {
+        InsertEndMarker();
+    }
+
+    private void PlaylistMenuSetStartTime_Click(object? sender, EventArgs e)
+    {
+        SetSelectedPlaylistStartTime();
+    }
+
+    private void PlaylistMenuSelectAll_Click(object? sender, EventArgs e)
+    {
+        SetPlaylistPlayEnabledForAll(true);
+    }
+
+    private void PlaylistMenuDeselectAll_Click(object? sender, EventArgs e)
+    {
+        SetPlaylistPlayEnabledForAll(false);
+    }
+
+    private void PlaylistMenuPlayInFfplay_Click(object? sender, EventArgs e)
+    {
+        PlaySelectedPlaylistItemInExternalPlayer("ffplay");
     }
 
     private void PlaylistGrid_CellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
@@ -1866,6 +2458,29 @@ internal sealed class MainForm : Form
         return -1;
     }
 
+    private void PlaylistGrid_CellContentClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 ||
+            e.ColumnIndex < 0 ||
+            e.RowIndex >= _playlistItems.Count ||
+            _playlistGrid.Columns[e.ColumnIndex] is not DataGridViewCheckBoxColumn)
+        {
+            return;
+        }
+
+        BeginInvoke(new Action(() =>
+        {
+            if (e.RowIndex >= _playlistGrid.Rows.Count || e.ColumnIndex >= _playlistGrid.Columns.Count)
+            {
+                return;
+            }
+
+            _playlistGrid.CurrentCell = _playlistGrid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+            _playlistGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            _playlistGrid.EndEdit();
+        }));
+    }
+
     private void PlaylistGrid_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
     {
         if (_playlistGrid.IsCurrentCellDirty &&
@@ -1893,6 +2508,15 @@ internal sealed class MainForm : Form
 
         var item = _playlistItems[e.RowIndex];
         var value = _playlistGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value is bool checkedValue && checkedValue;
+        if (item.IsEndMarker)
+        {
+            item.PlayEnabled = false;
+            item.LoopEnabled = false;
+            item.Status = PlaylistStatusEnd;
+            RefreshPlaylistGrid(e.RowIndex);
+            return;
+        }
+
         if (columnName == "PlayEnabled")
         {
             if (_playlistPlayingIndex == e.RowIndex && !value)
@@ -1910,6 +2534,7 @@ internal sealed class MainForm : Form
             }
 
             RefreshPlaylistGrid(e.RowIndex);
+            SetStatus(value ? "Playlist row enabled" : "Playlist row disabled", Color.FromArgb(130, 210, 164));
             return;
         }
 
@@ -1976,6 +2601,7 @@ internal sealed class MainForm : Form
 
     private void AddPlaylistItem(PlaylistItem item, string statusMessage)
     {
+        PreparePlaylistItemForInsert(item);
         var insertIndex = GetSelectedPlaylistIndex();
         if (insertIndex.HasValue && insertIndex.Value >= 0 && insertIndex.Value < _playlistItems.Count)
         {
@@ -1989,6 +2615,147 @@ internal sealed class MainForm : Form
         }
 
         SetStatus(statusMessage, Color.FromArgb(130, 210, 164));
+    }
+
+    private static void PreparePlaylistItemForInsert(PlaylistItem item)
+    {
+        if (!item.IsEndMarker)
+        {
+            return;
+        }
+
+        item.PlayEnabled = false;
+        item.LoopEnabled = false;
+        item.Status = PlaylistStatusEnd;
+    }
+
+    private void InsertEndMarker()
+    {
+        AddPlaylistItem(
+            new PlaylistItem(PlaylistEndMarkerText)
+            {
+                PlayEnabled = false,
+                LoopEnabled = false,
+                Status = PlaylistStatusEnd,
+            },
+            "Inserted END marker");
+    }
+
+    private void SetSelectedPlaylistStartTime()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue || !CanSetPlaylistStartTime(index.Value))
+        {
+            SetStatus("Choose a playable playlist row first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var defaultStart = TryGetPlaylistStartTime(index.Value, out var currentStart)
+            ? currentStart
+            : TimeSpan.Zero;
+        var text = ShowPlaylistStartTimeDialog(defaultStart);
+        if (text is null)
+        {
+            return;
+        }
+
+        if (!TryParseGridDuration(text, out var startTime))
+        {
+            SetStatus("Use start time as HH:MM:SS", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        _playlistItems[index.Value].TimelineStartOverride = startTime;
+        ClearFollowingTimelineStartOverridesUntilEnd(index.Value);
+        RefreshPlaylistGrid(index.Value);
+        SetStatus($"Row {index.Value + 1} start set to {FormatGridDuration(startTime)}", Color.FromArgb(130, 210, 164));
+    }
+
+    private bool CanSetPlaylistStartTime(int index)
+    {
+        return index >= 0 &&
+            index < _playlistItems.Count &&
+            !_playlistItems[index].IsEndMarker &&
+            _playlistItems[index].PlayEnabled &&
+            File.Exists(_playlistItems[index].FullPath);
+    }
+
+    private void ClearFollowingTimelineStartOverridesUntilEnd(int startIndex)
+    {
+        for (var i = startIndex + 1; i < _playlistItems.Count; i++)
+        {
+            if (_playlistItems[i].IsEndMarker)
+            {
+                break;
+            }
+
+            _playlistItems[i].TimelineStartOverride = null;
+        }
+    }
+
+    private string? ShowPlaylistStartTimeDialog(TimeSpan defaultStart)
+    {
+        using var dialog = new Form
+        {
+            Text = "Set Start Time",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(284, 128),
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            BackColor = ThemePanelColor(_darkMode),
+            ForeColor = ThemeTextColor(_darkMode),
+        };
+
+        var label = new Label
+        {
+            Text = "Start Time",
+            AutoSize = false,
+            Location = new Point(14, 14),
+            Size = new Size(256, 20),
+            ForeColor = ThemeMutedTextColor(_darkMode),
+            BackColor = dialog.BackColor,
+        };
+        var input = new TextBox
+        {
+            Text = FormatGridDuration(defaultStart),
+            Location = new Point(14, 40),
+            Size = new Size(256, 24),
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = _darkMode ? Color.FromArgb(20, 24, 28) : Color.White,
+            ForeColor = ThemeTextColor(_darkMode),
+        };
+        var okButton = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            Location = new Point(108, 82),
+            Size = new Size(76, 28),
+        };
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(194, 82),
+            Size = new Size(76, 28),
+        };
+
+        StyleButton(okButton, Color.FromArgb(39, 125, 87));
+        StyleButton(cancelButton, Color.FromArgb(52, 67, 82));
+        ApplyButtonTheme(okButton, _darkMode);
+        ApplyButtonTheme(cancelButton, _darkMode);
+
+        dialog.Controls.AddRange([label, input, okButton, cancelButton]);
+        dialog.AcceptButton = okButton;
+        dialog.CancelButton = cancelButton;
+        dialog.Shown += (_, _) =>
+        {
+            input.Focus();
+            input.SelectAll();
+        };
+
+        return dialog.ShowDialog(this) == DialogResult.OK ? input.Text.Trim() : null;
     }
 
     private void MarkTrimIn()
@@ -2314,6 +3081,310 @@ internal sealed class MainForm : Form
         RefreshPlaylistGrid(toIndex);
     }
 
+    private void CopySelectedPlaylistItem()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue || index.Value < 0 || index.Value >= _playlistItems.Count)
+        {
+            SetStatus("Choose a playlist row first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        _playlistClipboardItem = CreatePlaylistInsertCopy(_playlistItems[index.Value]);
+        try
+        {
+            Clipboard.SetText(_playlistClipboardItem.FullPath);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Clipboard copy skipped: {ex.Message}");
+        }
+
+        SetStatus($"Copied row {index.Value + 1}", Color.FromArgb(130, 210, 164));
+    }
+
+    private void PastePlaylistItem()
+    {
+        var item = _playlistClipboardItem is not null
+            ? CreatePlaylistInsertCopy(_playlistClipboardItem)
+            : TryCreatePlaylistItemFromClipboard();
+        if (item is null)
+        {
+            SetStatus("No playlist item to paste", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        AddPlaylistItem(item, $"Pasted {Path.GetFileName(item.FullPath)}");
+    }
+
+    private PlaylistItem? TryCreatePlaylistItemFromClipboard()
+    {
+        try
+        {
+            if (!Clipboard.ContainsText())
+            {
+                return null;
+            }
+
+            var path = Clipboard.GetText().Trim();
+            if (IsPlaylistEndMarkerText(path))
+            {
+                return new PlaylistItem(PlaylistEndMarkerText)
+                {
+                    PlayEnabled = false,
+                    LoopEnabled = false,
+                    Status = PlaylistStatusEnd,
+                };
+            }
+
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || !IsSupportedMediaFile(path))
+            {
+                return null;
+            }
+
+            var duration = GetKnownMediaDuration(path);
+            var isStill = IsImageFile(path);
+            return new PlaylistItem(path)
+            {
+                SourceDuration = isStill ? DefaultStillDuration : duration,
+                TcIn = TimeSpan.Zero,
+                TcOut = isStill ? DefaultStillDuration : duration,
+                Status = PlaylistStatusReady,
+            };
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Clipboard paste skipped: {ex.Message}");
+            return null;
+        }
+    }
+
+    private bool CanPastePlaylistItem()
+    {
+        if (_playlistClipboardItem is not null)
+        {
+            return true;
+        }
+
+        try
+        {
+            if (!Clipboard.ContainsText())
+            {
+                return false;
+            }
+
+            var text = Clipboard.GetText().Trim();
+            return IsPlaylistEndMarkerText(text) ||
+                (File.Exists(text) && IsSupportedMediaFile(text));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static PlaylistItem CreatePlaylistInsertCopy(PlaylistItem source)
+    {
+        if (source.IsEndMarker)
+        {
+            return new PlaylistItem(PlaylistEndMarkerText)
+            {
+                PlayEnabled = false,
+                LoopEnabled = false,
+                Status = PlaylistStatusEnd,
+            };
+        }
+
+        return new PlaylistItem(source.FullPath)
+        {
+            SourceDuration = source.SourceDuration,
+            TcIn = source.TcIn,
+            TcOut = source.TcOut,
+            PlayEnabled = source.PlayEnabled,
+            LoopEnabled = source.LoopEnabled,
+            Status = PlaylistStatusReady,
+        };
+    }
+
+    private void CheckPlaylistFiles()
+    {
+        var missing = 0;
+        for (var i = 0; i < _playlistItems.Count; i++)
+        {
+            if (_playlistItems[i].IsEndMarker)
+            {
+                _playlistItems[i].PlayEnabled = false;
+                _playlistItems[i].LoopEnabled = false;
+                _playlistItems[i].Status = PlaylistStatusEnd;
+                continue;
+            }
+
+            if (File.Exists(_playlistItems[i].FullPath))
+            {
+                if (_playlistItems[i].Status == PlaylistStatusMissing)
+                {
+                    _playlistItems[i].Status = PlaylistStatusReady;
+                }
+            }
+            else
+            {
+                _playlistItems[i].Status = PlaylistStatusMissing;
+                missing++;
+            }
+        }
+
+        RefreshPlaylistGrid(GetSelectedPlaylistIndex());
+        SetStatus(
+            missing == 0 ? "All playlist files found" : $"{missing} playlist file(s) missing",
+            missing == 0 ? Color.FromArgb(130, 210, 164) : Color.FromArgb(232, 181, 105));
+    }
+
+    private void OpenSelectedPlaylistItemInTrimmer()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue || index.Value < 0 || index.Value >= _playlistItems.Count)
+        {
+            SetStatus("Choose a playlist row first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var item = _playlistItems[index.Value];
+        if (item.IsEndMarker || !File.Exists(item.FullPath))
+        {
+            SetStatus("Playlist file missing", Color.FromArgb(229, 113, 105));
+            return;
+        }
+
+        SelectMediaPath(item.FullPath);
+        _selectedStartOffset = item.TcIn;
+        if (item.SourceDuration.HasValue)
+        {
+            _selectedDurationPath = item.FullPath;
+            _selectedMediaDuration = item.SourceDuration.Value;
+            _selectedDurationUnavailable = false;
+        }
+
+        _trimMarkPath = item.FullPath;
+        _markInOffset = item.TcIn;
+        _markOutOffset = item.TcOut;
+        UpdateDurationLabel();
+        UpdateTrimControls();
+        SetStatus($"Opened row {index.Value + 1} in trimmer", Color.FromArgb(130, 210, 164));
+    }
+
+    private void SetPlaylistPlayEnabledForAll(bool enabled)
+    {
+        var skippedPlaying = false;
+        for (var i = 0; i < _playlistItems.Count; i++)
+        {
+            if (_playlistItems[i].IsEndMarker)
+            {
+                _playlistItems[i].PlayEnabled = false;
+                _playlistItems[i].LoopEnabled = false;
+                _playlistItems[i].Status = PlaylistStatusEnd;
+                continue;
+            }
+
+            if (!enabled && _playlistPlayingIndex == i)
+            {
+                skippedPlaying = true;
+                continue;
+            }
+
+            _playlistItems[i].PlayEnabled = enabled;
+            if (!enabled && _playlistItems[i].Status == PlaylistStatusNext)
+            {
+                _playlistItems[i].Status = PlaylistStatusReady;
+            }
+        }
+
+        RefreshPlaylistGrid(GetSelectedPlaylistIndex());
+        SetStatus(
+            enabled ? "Selected all playlist rows" : skippedPlaying ? "Deselected rows except playing row" : "Deselected all playlist rows",
+            Color.FromArgb(130, 210, 164));
+    }
+
+    private void PlaySelectedPlaylistItemInExternalPlayer(string playerName)
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue || index.Value < 0 || index.Value >= _playlistItems.Count)
+        {
+            SetStatus("Choose a playlist row first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var item = _playlistItems[index.Value];
+        if (item.IsEndMarker)
+        {
+            SetStatus("END marker is not a media row", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var path = item.FullPath;
+        if (!File.Exists(path))
+        {
+            SetStatus("Playlist file missing", Color.FromArgb(229, 113, 105));
+            return;
+        }
+
+        var playerPath = FindExternalPlayerPath(playerName);
+        if (playerPath is null)
+        {
+            SetStatus($"{playerName} not found", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = playerPath,
+                UseShellExecute = false,
+                ArgumentList = { path },
+            });
+            SetStatus($"Opened in {playerName}", Color.FromArgb(130, 210, 164));
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"{playerName} launch failed: {ex.Message}");
+            SetStatus($"{playerName} launch failed", Color.FromArgb(229, 113, 105));
+        }
+    }
+
+    private string? FindExternalPlayerPath(string playerName)
+    {
+        if (string.Equals(playerName, "ffplay", StringComparison.OrdinalIgnoreCase))
+        {
+            var ffmpegDirectory = Path.GetDirectoryName(GetFfmpegPath());
+            var ffplayPath = string.IsNullOrWhiteSpace(ffmpegDirectory)
+                ? null
+                : Path.Combine(ffmpegDirectory, "ffplay.exe");
+            if (!string.IsNullOrWhiteSpace(ffplayPath) && File.Exists(ffplayPath))
+            {
+                return ffplayPath;
+            }
+        }
+
+        if (string.Equals(playerName, "vlc", StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var candidate in EnumerateVlcCandidates())
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return playerName;
+    }
+
+    private static IEnumerable<string> EnumerateVlcCandidates()
+    {
+        yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "VideoLAN", "VLC", "vlc.exe");
+        yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "VideoLAN", "VLC", "vlc.exe");
+    }
+
     private void CueRelativePlaylistItem(int direction, int? referenceIndex = null)
     {
         var index = FindRelativePlaylistIndex(direction, referenceIndex);
@@ -2416,6 +3487,11 @@ internal sealed class MainForm : Form
 
         while (index >= 0 && index < _playlistItems.Count)
         {
+            if (_playlistItems[index].IsEndMarker)
+            {
+                return null;
+            }
+
             if (IsPlaylistRowCueable(index))
             {
                 return index;
@@ -2441,6 +3517,7 @@ internal sealed class MainForm : Form
     {
         return index >= 0 &&
             index < _playlistItems.Count &&
+            !_playlistItems[index].IsEndMarker &&
             _playlistItems[index].PlayEnabled &&
             File.Exists(_playlistItems[index].FullPath);
     }
@@ -2461,6 +3538,14 @@ internal sealed class MainForm : Form
     {
         if (index < 0 || index >= _playlistItems.Count)
         {
+            return;
+        }
+
+        if (_playlistItems[index].IsEndMarker)
+        {
+            _playlistItems[index].Status = PlaylistStatusEnd;
+            RefreshPlaylistGrid(index);
+            SetStatus("END marker stops playlist repeat", Color.FromArgb(232, 181, 105));
             return;
         }
 
@@ -2485,6 +3570,7 @@ internal sealed class MainForm : Form
 
         SelectMediaPath(item.FullPath);
         _selectedStartOffset = item.TcIn;
+        SetPlaylistStartTimeFromPlayback(index);
         MarkPlaylistItemPlaying(index);
         AppendLog($"Starting playlist row {index + 1}: {Path.GetFileName(item.FullPath)}");
         var playDuration = item.PlayDuration;
@@ -2494,6 +3580,18 @@ internal sealed class MainForm : Form
             playDuration: playDuration,
             sourceDuration: item.SourceDuration,
             playLoop: item.LoopEnabled && !playDuration.HasValue);
+    }
+
+    private void SetPlaylistStartTimeFromPlayback(int index)
+    {
+        if (!CanSetPlaylistStartTime(index))
+        {
+            return;
+        }
+
+        var now = DateTime.Now.TimeOfDay;
+        _playlistItems[index].TimelineStartOverride = TimeSpan.FromSeconds(Math.Floor(now.TotalSeconds));
+        ClearFollowingTimelineStartOverridesUntilEnd(index);
     }
 
     private async Task StopActivePlaybackForReplacementAsync()
@@ -2525,7 +3623,13 @@ internal sealed class MainForm : Form
         _playlistPlayingIndex = index;
         for (var i = 0; i < _playlistItems.Count; i++)
         {
-            if (!File.Exists(_playlistItems[i].FullPath))
+            if (_playlistItems[i].IsEndMarker)
+            {
+                _playlistItems[i].PlayEnabled = false;
+                _playlistItems[i].LoopEnabled = false;
+                _playlistItems[i].Status = PlaylistStatusEnd;
+            }
+            else if (!File.Exists(_playlistItems[i].FullPath))
             {
                 _playlistItems[i].Status = PlaylistStatusMissing;
             }
@@ -2543,7 +3647,7 @@ internal sealed class MainForm : Form
             }
         }
 
-        var next = FindNextPlayablePlaylistIndex(index + 1);
+        var next = FindNextRepeatingPlaylistIndex(index, out _);
         if (next.HasValue)
         {
             _playlistItems[next.Value].Status = PlaylistStatusNext;
@@ -2580,7 +3684,7 @@ internal sealed class MainForm : Form
         for (var i = startIndex; i < _playlistItems.Count; i++)
         {
             var item = _playlistItems[i];
-            if (item.PlayEnabled && File.Exists(item.FullPath) && item.Status == PlaylistStatusPlayed)
+            if (!item.IsEndMarker && item.PlayEnabled && File.Exists(item.FullPath) && item.Status == PlaylistStatusPlayed)
             {
                 item.Status = PlaylistStatusReady;
                 changed = true;
@@ -2603,9 +3707,11 @@ internal sealed class MainForm : Form
         var index = _playlistPlayingIndex.Value;
         _playlistPlayingIndex = null;
         int? nextToPlay = null;
+        int? endMarkerIndex = null;
         if (index >= 0 && index < _playlistItems.Count)
         {
             if (completedNormally &&
+                !_playlistItems[index].IsEndMarker &&
                 _playlistItems[index].LoopEnabled &&
                 _playlistItems[index].PlayEnabled &&
                 File.Exists(_playlistItems[index].FullPath))
@@ -2617,27 +3723,34 @@ internal sealed class MainForm : Form
             }
 
             _playlistItems[index].Status = completedNormally ? PlaylistStatusPlayed : PlaylistStatusReady;
-            var next = FindNextPlayablePlaylistIndex(index + 1);
             if (completedNormally)
             {
-                nextToPlay = next;
+                nextToPlay = FindNextRepeatingPlaylistIndex(index, out endMarkerIndex);
+                if (nextToPlay.HasValue)
+                {
+                    _playlistItems[nextToPlay.Value].Status = PlaylistStatusNext;
+                }
             }
-            else if (next.HasValue)
+            else
             {
-                _playlistItems[next.Value].Status = PlaylistStatusReady;
+                var next = FindNextPlayablePlaylistIndex(index + 1);
+                if (next.HasValue)
+                {
+                    _playlistItems[next.Value].Status = PlaylistStatusReady;
+                }
             }
         }
 
-        var selectedAfterCompletion = nextToPlay ?? index;
-        if (completedNormally && !nextToPlay.HasValue && AreAllPlayablePlaylistItemsPlayed())
-        {
-            selectedAfterCompletion = FindFirstExistingPlaylistIndex() ?? index;
-        }
+        var selectedAfterCompletion = nextToPlay ?? endMarkerIndex ?? index;
 
         RefreshPlaylistGrid(selectedAfterCompletion);
         if (completedNormally && _autoPlayPlaylistCheckBox.Checked && nextToPlay.HasValue)
         {
             QueuePlaylistAutoNext(nextToPlay.Value);
+        }
+        else if (completedNormally && endMarkerIndex.HasValue)
+        {
+            SetStatus("Playlist stopped at END marker", Color.FromArgb(232, 181, 105));
         }
     }
 
@@ -2667,9 +3780,44 @@ internal sealed class MainForm : Form
         for (var i = Math.Max(0, startIndex); i < _playlistItems.Count; i++)
         {
             var item = _playlistItems[i];
+            if (item.IsEndMarker)
+            {
+                return null;
+            }
+
             if (item.PlayEnabled && File.Exists(item.FullPath) && item.Status != PlaylistStatusPlayed)
             {
                 return i;
+            }
+        }
+
+        return null;
+    }
+
+    private int? FindNextRepeatingPlaylistIndex(int referenceIndex, out int? endMarkerIndex)
+    {
+        endMarkerIndex = null;
+        if (_playlistItems.Count == 0)
+        {
+            return null;
+        }
+
+        var startIndex = referenceIndex < 0 || referenceIndex >= _playlistItems.Count
+            ? 0
+            : (referenceIndex + 1) % _playlistItems.Count;
+        for (var offset = 0; offset < _playlistItems.Count; offset++)
+        {
+            var index = (startIndex + offset) % _playlistItems.Count;
+            var item = _playlistItems[index];
+            if (item.IsEndMarker)
+            {
+                endMarkerIndex = index;
+                return null;
+            }
+
+            if (item.PlayEnabled && File.Exists(item.FullPath))
+            {
+                return index;
             }
         }
 
@@ -2681,7 +3829,7 @@ internal sealed class MainForm : Form
         var hasPlayableItem = false;
         foreach (var item in _playlistItems)
         {
-            if (!item.PlayEnabled || !File.Exists(item.FullPath))
+            if (item.IsEndMarker || !item.PlayEnabled || !File.Exists(item.FullPath))
             {
                 continue;
             }
@@ -2700,13 +3848,75 @@ internal sealed class MainForm : Form
     {
         for (var i = 0; i < _playlistItems.Count; i++)
         {
-            if (_playlistItems[i].PlayEnabled && File.Exists(_playlistItems[i].FullPath))
+            if (!_playlistItems[i].IsEndMarker && _playlistItems[i].PlayEnabled && File.Exists(_playlistItems[i].FullPath))
             {
                 return i;
             }
         }
 
         return null;
+    }
+
+    private bool TryGetPlaylistStartTime(int targetIndex, out TimeSpan startTime)
+    {
+        startTime = TimeSpan.Zero;
+        if (targetIndex < 0 || targetIndex >= _playlistItems.Count)
+        {
+            return false;
+        }
+
+        var timelineKnown = true;
+        var cursor = TimeSpan.Zero;
+        for (var i = 0; i <= targetIndex; i++)
+        {
+            var item = _playlistItems[i];
+            if (item.IsEndMarker)
+            {
+                cursor = TimeSpan.Zero;
+                timelineKnown = true;
+                if (i == targetIndex)
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            var isScheduled = item.PlayEnabled && File.Exists(item.FullPath);
+            if (isScheduled && item.TimelineStartOverride.HasValue)
+            {
+                cursor = item.TimelineStartOverride.Value;
+                timelineKnown = true;
+            }
+
+            if (i == targetIndex)
+            {
+                if (!isScheduled || !timelineKnown)
+                {
+                    return false;
+                }
+
+                startTime = cursor;
+                return true;
+            }
+
+            if (!isScheduled)
+            {
+                continue;
+            }
+
+            var duration = item.PlayDuration;
+            if (timelineKnown && duration.HasValue)
+            {
+                cursor += duration.Value;
+            }
+            else
+            {
+                timelineKnown = false;
+            }
+        }
+
+        return false;
     }
 
     private void RefreshPlaylistGrid(int? selectedIndex = null)
@@ -2719,26 +3929,48 @@ internal sealed class MainForm : Form
         for (var i = 0; i < _playlistItems.Count; i++)
         {
             var item = _playlistItems[i];
+            var isEndMarker = item.IsEndMarker;
             var duration = item.PlayDuration;
-            var startText = timelineKnown ? FormatGridDuration(cursor) : "--";
-            var endText = timelineKnown && duration.HasValue ? FormatGridDuration(cursor + duration.Value) : "--";
+            var isScheduled = !isEndMarker && item.PlayEnabled && File.Exists(item.FullPath);
+            if (isScheduled && item.TimelineStartOverride.HasValue)
+            {
+                cursor = item.TimelineStartOverride.Value;
+                timelineKnown = true;
+            }
+
+            var startText = isScheduled && timelineKnown ? FormatGridDuration(cursor) : "--";
+            var endText = isScheduled && timelineKnown && duration.HasValue ? FormatGridDuration(cursor + duration.Value) : "--";
             var rowIndex = _playlistGrid.Rows.Add(
                 (i + 1).ToString(CultureInfo.InvariantCulture),
-                item.Status,
+                isEndMarker ? PlaylistStatusEnd : item.Status,
                 startText,
-                item.PlayEnabled,
-                GetMediaDisplayPath(item.FullPath),
-                FormatPlaylistTime(item.TcIn),
-                item.TcOut.HasValue ? FormatPlaylistTime(item.TcOut.Value) : "--",
-                duration.HasValue ? FormatPlaylistTime(duration.Value) : "--",
-                item.LoopEnabled,
+                !isEndMarker && item.PlayEnabled,
+                isEndMarker ? PlaylistEndMarkerText : GetMediaDisplayPath(item.FullPath),
+                isEndMarker ? "--" : FormatPlaylistTime(item.TcIn),
+                isEndMarker ? "--" : item.TcOut.HasValue ? FormatPlaylistTime(item.TcOut.Value) : "--",
+                !isEndMarker && duration.HasValue ? FormatPlaylistTime(duration.Value) : "--",
+                !isEndMarker && item.LoopEnabled,
                 endText,
                 item.FullPath);
 
             var row = _playlistGrid.Rows[rowIndex];
             row.Tag = item;
-            row.Cells["Clip"].ToolTipText = item.FullPath;
-            ApplyPlaylistRowStyle(row, item.Status);
+            row.Cells["Clip"].ToolTipText = isEndMarker ? "Playlist stops here during repeat" : item.FullPath;
+            row.Cells["PlayEnabled"].ReadOnly = isEndMarker;
+            row.Cells["LoopEnabled"].ReadOnly = isEndMarker;
+            ApplyPlaylistRowStyle(row, isEndMarker ? PlaylistStatusEnd : item.Status);
+
+            if (isEndMarker)
+            {
+                cursor = TimeSpan.Zero;
+                timelineKnown = true;
+                continue;
+            }
+
+            if (!isScheduled)
+            {
+                continue;
+            }
 
             if (timelineKnown && duration.HasValue)
             {
@@ -2766,6 +3998,14 @@ internal sealed class MainForm : Form
         var hasNext = false;
         foreach (var item in _playlistItems)
         {
+            if (item.IsEndMarker)
+            {
+                item.PlayEnabled = false;
+                item.LoopEnabled = false;
+                item.Status = PlaylistStatusEnd;
+                continue;
+            }
+
             if (!File.Exists(item.FullPath))
             {
                 item.Status = PlaylistStatusMissing;
@@ -2806,25 +4046,48 @@ internal sealed class MainForm : Form
         }
     }
 
-    private static void ApplyPlaylistRowStyle(DataGridViewRow row, string status)
+    private void ApplyPlaylistRowStyle(DataGridViewRow row, string status)
     {
-        var color = status switch
-        {
-            PlaylistStatusPlaying => Color.FromArgb(124, 49, 45),
-            PlaylistStatusNext => Color.FromArgb(93, 76, 34),
-            PlaylistStatusPlayed => Color.FromArgb(48, 53, 58),
-            PlaylistStatusMissing => Color.FromArgb(96, 48, 31),
-            _ => row.Index % 2 == 0 ? Color.FromArgb(17, 20, 24) : Color.FromArgb(29, 34, 39),
-        };
+        var color = _darkMode
+            ? status switch
+            {
+                PlaylistStatusPlaying => Color.FromArgb(124, 49, 45),
+                PlaylistStatusNext => Color.FromArgb(93, 76, 34),
+                PlaylistStatusPlayed => Color.FromArgb(48, 53, 58),
+                PlaylistStatusMissing => Color.FromArgb(96, 48, 31),
+                PlaylistStatusEnd => Color.FromArgb(64, 46, 70),
+                _ => row.Index % 2 == 0 ? Color.FromArgb(17, 20, 24) : Color.FromArgb(29, 34, 39),
+            }
+            : status switch
+            {
+                PlaylistStatusPlaying => Color.FromArgb(255, 224, 224),
+                PlaylistStatusNext => Color.FromArgb(255, 242, 205),
+                PlaylistStatusPlayed => Color.FromArgb(232, 236, 240),
+                PlaylistStatusMissing => Color.FromArgb(255, 229, 210),
+                PlaylistStatusEnd => Color.FromArgb(238, 228, 245),
+                _ => row.Index % 2 == 0 ? Color.White : Color.FromArgb(245, 248, 251),
+            };
 
         row.DefaultCellStyle.BackColor = color;
-        row.DefaultCellStyle.SelectionBackColor = status switch
-        {
-            PlaylistStatusPlaying => Color.FromArgb(158, 64, 58),
-            PlaylistStatusNext => Color.FromArgb(126, 95, 38),
-            PlaylistStatusMissing => Color.FromArgb(136, 62, 37),
-            _ => Color.FromArgb(32, 116, 190),
-        };
+        row.DefaultCellStyle.ForeColor = _darkMode ? Color.FromArgb(226, 234, 238) : Color.FromArgb(24, 29, 34);
+        row.DefaultCellStyle.SelectionBackColor = _darkMode
+            ? status switch
+            {
+                PlaylistStatusPlaying => Color.FromArgb(158, 64, 58),
+                PlaylistStatusNext => Color.FromArgb(126, 95, 38),
+                PlaylistStatusMissing => Color.FromArgb(136, 62, 37),
+                PlaylistStatusEnd => Color.FromArgb(95, 68, 106),
+                _ => Color.FromArgb(32, 116, 190),
+            }
+            : status switch
+            {
+                PlaylistStatusPlaying => Color.FromArgb(221, 93, 86),
+                PlaylistStatusNext => Color.FromArgb(217, 167, 59),
+                PlaylistStatusMissing => Color.FromArgb(216, 111, 70),
+                PlaylistStatusEnd => Color.FromArgb(146, 103, 166),
+                _ => Color.FromArgb(62, 135, 210),
+            };
+        row.DefaultCellStyle.SelectionForeColor = Color.White;
     }
 
     private int? GetSelectedPlaylistIndex()
@@ -2894,7 +4157,7 @@ internal sealed class MainForm : Form
         var selectedPlayable = selectedIndex.HasValue &&
             selectedIndex.Value >= 0 &&
             selectedIndex.Value < _playlistItems.Count &&
-            _playlistItems[selectedIndex.Value].PlayEnabled;
+            IsPlaylistRowCueable(selectedIndex.Value);
         var controlsEnabled = _playlistGrid.Enabled;
         _addToPlaylistButton.Enabled = controlsEnabled && (GetSelectedMediaGridPath() is not null || File.Exists(_inputPathBox.Text.Trim()));
         _playPlaylistItemButton.Enabled = controlsEnabled && hasPlaylistSelection && selectedPlayable;
@@ -2902,6 +4165,7 @@ internal sealed class MainForm : Form
         _movePlaylistItemUpButton.Enabled = controlsEnabled && selectedIndex is > 0;
         _movePlaylistItemDownButton.Enabled = controlsEnabled && selectedIndex.HasValue && selectedIndex.Value < _playlistItems.Count - 1;
         _clearPlaylistButton.Enabled = controlsEnabled && _playlistItems.Count > 0;
+        _setPlaylistStartTimeButton.Enabled = controlsEnabled && selectedIndex.HasValue && CanSetPlaylistStartTime(selectedIndex.Value);
         var hasPrevious = FindRelativePlaylistIndex(-1).HasValue;
         var hasNext = FindRelativePlaylistIndex(1).HasValue;
         _previousCueButton.Enabled = controlsEnabled && hasPrevious;
@@ -2918,10 +4182,30 @@ internal sealed class MainForm : Form
         var isStill = hasMedia && IsImageFile(path);
         var durationKnown = hasMedia && (isStill || GetKnownMediaDuration(path).HasValue || GetCurrentSeekDuration().HasValue);
         var canMark = hasMedia && !isStill && !_playbackIsTestPattern && _positionBar.Enabled && durationKnown;
+        var canSeekCommand = hasMedia && !isStill && !_playbackIsTestPattern && _positionBar.Enabled && durationKnown;
 
         _markInButton.Enabled = canMark;
         _markOutButton.Enabled = canMark;
         _addTrimmedToPlaylistButton.Enabled = hasMedia && durationKnown;
+        _goToInButton.Enabled = canSeekCommand;
+        _playFromInButton.Enabled = canSeekCommand;
+        _playInToOutButton.Enabled = canSeekCommand;
+        _goToTcButton.Enabled = canSeekCommand;
+        _goToTcBox.Enabled = canSeekCommand;
+        _goToOutButton.Enabled = canSeekCommand;
+        _lastSecondsBox.Enabled = canSeekCommand;
+        _playLastSecondsButton.Enabled = canSeekCommand;
+
+        if (TryGetCurrentTrimRange(out _, out var markIn, out var markOut, out _))
+        {
+            _markInValueBox.Text = FormatPlaylistTime(markIn);
+            _markOutValueBox.Text = FormatPlaylistTime(markOut);
+        }
+        else
+        {
+            _markInValueBox.Text = "--";
+            _markOutValueBox.Text = "--";
+        }
     }
 
     private void StyleMediaGrid()
@@ -2998,6 +4282,7 @@ internal sealed class MainForm : Form
 
         _mediaGridContextMenu.Items.Add(_mediaGridMenuFileInfo);
         _mediaGrid.ContextMenuStrip = _mediaGridContextMenu;
+        ApplyContextMenuTheme(_mediaGridContextMenu, _darkMode);
     }
 
     private void LoadMediaTree()
@@ -4587,6 +5872,210 @@ internal sealed class MainForm : Form
         SetCurrentTimeDisplay(target);
     }
 
+    private bool TryGetCurrentTrimRange(
+        out TimeSpan sourceDuration,
+        out TimeSpan markIn,
+        out TimeSpan markOut,
+        out string? path)
+    {
+        sourceDuration = TimeSpan.Zero;
+        markIn = TimeSpan.Zero;
+        markOut = TimeSpan.Zero;
+        path = GetCurrentMediaPath();
+        if (path is null || IsImageFile(path))
+        {
+            return false;
+        }
+
+        var duration = GetCurrentSeekDuration() ?? GetKnownMediaDuration(path);
+        if (!duration.HasValue || duration.Value <= TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        sourceDuration = duration.Value;
+        var marksMatchPath = string.Equals(_trimMarkPath, path, StringComparison.OrdinalIgnoreCase);
+        markIn = marksMatchPath && _markInOffset.HasValue ? _markInOffset.Value : TimeSpan.Zero;
+        markOut = marksMatchPath && _markOutOffset.HasValue ? _markOutOffset.Value : sourceDuration;
+        markIn = ClampSeekOffset(markIn, sourceDuration);
+        markOut = ClampSeekOffset(markOut, sourceDuration);
+        if (markOut < markIn)
+        {
+            markOut = markIn;
+        }
+
+        return true;
+    }
+
+    private async Task GoToInAsync()
+    {
+        if (!TryGetCurrentTrimRange(out _, out var markIn, out _, out _))
+        {
+            SetStatus("IN point unavailable", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await SeekToOffsetAsync(markIn);
+    }
+
+    private async Task GoToOutAsync()
+    {
+        if (!TryGetCurrentTrimRange(out _, out _, out var markOut, out _))
+        {
+            SetStatus("OUT point unavailable", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await SeekToOffsetAsync(markOut);
+    }
+
+    private async Task PlayFromInAsync()
+    {
+        if (!TryGetCurrentTrimRange(out var sourceDuration, out var markIn, out _, out _))
+        {
+            SetStatus("IN point unavailable", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await PlayCurrentMediaRangeAsync(markIn, null, sourceDuration);
+    }
+
+    private async Task PlayInToOutAsync()
+    {
+        if (!TryGetCurrentTrimRange(out var sourceDuration, out var markIn, out var markOut, out _))
+        {
+            SetStatus("IN/OUT points unavailable", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        if (markOut <= markIn)
+        {
+            SetStatus("OUT must be after IN", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await PlayCurrentMediaRangeAsync(markIn, markOut - markIn, sourceDuration);
+    }
+
+    private async Task GoToTimecodeAsync()
+    {
+        if (!TryParseTimecodeOffset(_goToTcBox.Text, out var target))
+        {
+            SetStatus("Invalid timecode", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await SeekToOffsetAsync(target);
+    }
+
+    private bool TryParseTimecodeOffset(string text, out TimeSpan offset)
+    {
+        offset = TimeSpan.Zero;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var parts = text.Trim().Split(':', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 1 or > 4)
+        {
+            return false;
+        }
+
+        var hours = 0;
+        var minutes = 0;
+        var seconds = 0;
+        var frames = 0;
+        if (parts.Length == 4)
+        {
+            if (!TryParseNonNegativeInt(parts[0], out hours) ||
+                !TryParseNonNegativeInt(parts[1], out minutes) ||
+                !TryParseNonNegativeInt(parts[2], out seconds) ||
+                !TryParseNonNegativeInt(parts[3], out frames))
+            {
+                return false;
+            }
+        }
+        else if (parts.Length == 3)
+        {
+            if (!TryParseNonNegativeInt(parts[0], out hours) ||
+                !TryParseNonNegativeInt(parts[1], out minutes) ||
+                !TryParseNonNegativeInt(parts[2], out seconds))
+            {
+                return false;
+            }
+        }
+        else if (parts.Length == 2)
+        {
+            if (!TryParseNonNegativeInt(parts[0], out minutes) ||
+                !TryParseNonNegativeInt(parts[1], out seconds))
+            {
+                return false;
+            }
+        }
+        else if (!TryParseNonNegativeInt(parts[0], out seconds))
+        {
+            return false;
+        }
+
+        var frameRate = ParseFrameRate(_frameRateBox.Text);
+        if (frameRate <= 0)
+        {
+            frameRate = 25;
+        }
+
+        offset = TimeSpan.FromSeconds(hours * 3600d + minutes * 60d + seconds + frames / frameRate);
+        return true;
+    }
+
+    private static bool TryParseNonNegativeInt(string text, out int value)
+    {
+        return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) && value >= 0;
+    }
+
+    private async Task PlayLastSecondsAsync()
+    {
+        if (!TryGetCurrentTrimRange(out var sourceDuration, out _, out var markOut, out _))
+        {
+            SetStatus("OUT point unavailable", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var seconds = TimeSpan.FromSeconds((double)_lastSecondsBox.Value);
+        var start = markOut - seconds;
+        if (start < TimeSpan.Zero)
+        {
+            start = TimeSpan.Zero;
+        }
+
+        var duration = markOut - start;
+        if (duration <= TimeSpan.Zero)
+        {
+            SetStatus("Last seconds duration unavailable", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await PlayCurrentMediaRangeAsync(start, duration, sourceDuration);
+    }
+
+    private async Task PlayCurrentMediaRangeAsync(TimeSpan startOffset, TimeSpan? playDuration, TimeSpan? sourceDuration)
+    {
+        var path = GetCurrentMediaPath();
+        if (path is null || !SelectMediaPath(path))
+        {
+            SetStatus("Choose a media file first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await StopActivePlaybackForReplacementAsync();
+        _selectedStartOffset = ClampSeekOffset(startOffset, sourceDuration);
+        await StartPlaybackAsync(
+            dryRun: false,
+            startOffset: _selectedStartOffset,
+            playDuration: playDuration,
+            sourceDuration: sourceDuration);
+    }
+
     private async Task SeekToPositionBarValueAsync()
     {
         await SeekToOffsetAsync(GetPositionBarTime());
@@ -5203,6 +6692,11 @@ internal sealed class MainForm : Form
 
     private string GetMediaDisplayPath(string path)
     {
+        if (IsPlaylistEndMarkerText(path))
+        {
+            return PlaylistEndMarkerText;
+        }
+
         try
         {
             return Path.GetRelativePath(_mediaRootPath, path);
@@ -5211,6 +6705,11 @@ internal sealed class MainForm : Form
         {
             return Path.GetFileName(path);
         }
+    }
+
+    private static bool IsPlaylistEndMarkerText(string text)
+    {
+        return string.Equals(text.Trim(), PlaylistEndMarkerText, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task RefreshDevicesAsync()
@@ -6187,11 +7686,15 @@ internal sealed class MainForm : Form
 
         public string FullPath { get; }
 
+        public bool IsEndMarker => IsPlaylistEndMarkerText(FullPath);
+
         public TimeSpan TcIn { get; init; }
 
         public TimeSpan? TcOut { get; init; }
 
         public TimeSpan? SourceDuration { get; init; }
+
+        public TimeSpan? TimelineStartOverride { get; set; }
 
         public bool PlayEnabled { get; set; } = true;
 
@@ -6203,6 +7706,11 @@ internal sealed class MainForm : Form
         {
             get
             {
+                if (IsEndMarker)
+                {
+                    return null;
+                }
+
                 if (TcOut.HasValue && TcOut.Value > TcIn)
                 {
                     return TcOut.Value - TcIn;
@@ -6224,6 +7732,7 @@ internal sealed class MainForm : Form
                 TcIn = TcIn,
                 TcOut = TcOut,
                 SourceDuration = SourceDuration,
+                TimelineStartOverride = TimelineStartOverride,
                 PlayEnabled = PlayEnabled,
                 LoopEnabled = LoopEnabled,
                 Status = Status,
