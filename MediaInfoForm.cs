@@ -14,8 +14,8 @@ internal sealed class MediaInfoForm : Form
 
         Text = $"MediaInfo - {Path.GetFileName(path)}";
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(1040, 700);
-        MinimumSize = new Size(760, 480);
+        Size = new Size(780, 700);
+        MinimumSize = new Size(570, 480);
         BackColor = Color.FromArgb(22, 25, 29);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         ShowInTaskbar = false;
@@ -110,7 +110,7 @@ internal sealed class MediaInfoForm : Form
         {
             Name = "Property",
             HeaderText = "Property",
-            Width = 280,
+            Width = 210,
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
         _grid.Columns.Add(new DataGridViewTextBoxColumn

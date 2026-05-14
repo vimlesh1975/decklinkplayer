@@ -6,7 +6,7 @@ namespace ffmpegplayer;
 internal static class Program
 {
     [STAThread]
-    public static async Task<int> Main(string[] args)
+    public static int Main(string[] args)
     {
         if (args.Length > 0)
         {
@@ -15,7 +15,7 @@ internal static class Program
                 NativeConsole.AttachToParent();
             }
 
-            return await Cli.RunAsync(args);
+            return Cli.RunAsync(args).GetAwaiter().GetResult();
         }
 
         Application.EnableVisualStyles();
