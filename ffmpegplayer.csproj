@@ -59,7 +59,7 @@
   </Target>
 
   <Target Name="StartTimestampedExe" AfterTargets="CreateTimestampedExe" DependsOnTargets="CopyBundledFfmpegBinaries" Condition="'$(OutputType)' == 'WinExe' and '$(DesignTimeBuild)' != 'true'">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$exe = '$(TargetDir)$(TimestampedExeName)'; if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe -WorkingDirectory '$(TargetDir)' -WindowStyle Normal }&quot;" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$exe = '$(TargetDir)$(TimestampedExeName)'; if (Test-Path -LiteralPath $exe) { $quotedExe = [char]34 + $exe + [char]34; Start-Process -FilePath explorer.exe -ArgumentList $quotedExe; Write-Host ('Requested GUI launch through Explorer: ' + $exe) }&quot;" />
     <Message Importance="high" Text="Started timestamped executable: $(TargetDir)$(TimestampedExeName)" />
   </Target>
 

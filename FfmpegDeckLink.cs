@@ -141,6 +141,7 @@ internal sealed partial class FfmpegDeckLink
 
         }
 
+        AddDurationArguments(args, options.Duration);
         args.Add("-map");
         args.Add("0:v:0");
 
@@ -497,6 +498,17 @@ internal sealed partial class FfmpegDeckLink
         args.Add(FormatFfmpegTimestamp(startOffset));
     }
 
+    private static void AddDurationArguments(List<string> args, TimeSpan? duration)
+    {
+        if (!duration.HasValue || duration.Value <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        args.Add("-t");
+        args.Add(FormatFfmpegTimestamp(duration.Value));
+    }
+
     internal static string FormatFfmpegTimestamp(TimeSpan value)
     {
         if (value < TimeSpan.Zero)
@@ -583,7 +595,8 @@ internal sealed record PlayRequest(
     bool IsInterlaced,
     string? FieldOrder,
     bool UseTestPattern,
-    TimeSpan StartOffset = default);
+    TimeSpan StartOffset = default,
+    TimeSpan? Duration = null);
 
 internal sealed record ProcessResult(
     int ExitCode,

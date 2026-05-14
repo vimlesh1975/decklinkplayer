@@ -733,6 +733,7 @@ internal sealed class DeckLinkSdkPlayer
             args.Add(request.InputPath);
         }
 
+        AddDurationArguments(args, request.Duration);
         args.Add("-map");
         args.Add("0:v:0");
         args.Add("-an");
@@ -786,6 +787,7 @@ internal sealed class DeckLinkSdkPlayer
             args.Add(request.InputPath);
         }
 
+        AddDurationArguments(args, request.Duration);
         args.Add("-map");
         args.Add("0:a:0");
         args.Add("-vn");
@@ -854,6 +856,7 @@ internal sealed class DeckLinkSdkPlayer
         else
         {
             AddSeekArguments(args, request.StartOffset);
+            AddDurationArguments(args, request.Duration);
             args.Add(request.InputPath);
         }
 
@@ -886,6 +889,17 @@ internal sealed class DeckLinkSdkPlayer
 
         args.Add("-ss");
         args.Add(FfmpegDeckLink.FormatFfmpegTimestamp(startOffset));
+    }
+
+    private static void AddDurationArguments(List<string> args, TimeSpan? duration)
+    {
+        if (!duration.HasValue || duration.Value <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        args.Add("-t");
+        args.Add(FfmpegDeckLink.FormatFfmpegTimestamp(duration.Value));
     }
 
     private static async Task PumpErrorAsync(
