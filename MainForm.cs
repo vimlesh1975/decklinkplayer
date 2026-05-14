@@ -26,7 +26,7 @@ internal sealed class MainForm : Form
     private const int FixedClientHeight = 1080;
     private const int RootPadding = 16;
     private const int HeaderRowHeight = 64;
-    private const int ActionRowHeight = 104;
+    private const int ActionRowHeight = 140;
     private const int RemainingTimeRowHeight = 32;
     private const int CurrentTimeRowHeight = 32;
     private const int ToggleRowHeight = 44;
@@ -62,6 +62,14 @@ internal sealed class MainForm : Form
     private readonly TreeView _mediaTree = new();
     private readonly DataGridView _mediaGrid = new();
     private readonly DataGridView _playlistGrid = new();
+    private readonly ContextMenuStrip _playlistContextMenu = new();
+    private readonly ToolStripMenuItem _playlistMenuPlay = new("Play");
+    private readonly ToolStripMenuItem _playlistMenuPause = new("Pause");
+    private readonly ToolStripMenuItem _playlistMenuCue = new("Cue");
+    private readonly ToolStripMenuItem _playlistMenuCueNext = new("Cue Next");
+    private readonly ToolStripMenuItem _playlistMenuPlayNext = new("Play Next");
+    private readonly ToolStripMenuItem _playlistMenuCuePrevious = new("Cue Prev");
+    private readonly ToolStripMenuItem _playlistMenuPlayPrevious = new("Play Prev");
     private readonly Button _addToPlaylistButton = new();
     private readonly Button _removePlaylistItemButton = new();
     private readonly Button _movePlaylistItemUpButton = new();
@@ -98,6 +106,10 @@ internal sealed class MainForm : Form
     private readonly Button _seekForwardFiveFramesButton = new();
     private readonly Button _seekForwardTenFramesButton = new();
     private readonly Button _seekForwardOneSecondButton = new();
+    private readonly Button _previousCueButton = new();
+    private readonly Button _previousPlayButton = new();
+    private readonly Button _nextPlayButton = new();
+    private readonly Button _nextCueButton = new();
     private readonly Button _markInButton = new();
     private readonly Button _markOutButton = new();
     private readonly Button _addTrimmedToPlaylistButton = new();
@@ -994,6 +1006,17 @@ internal sealed class MainForm : Form
         button.Click += (_, _) => action();
     }
 
+    private void ConfigureTransportActionButton(Button button, string text, int width, Color color, Func<Task> action)
+    {
+        button.Text = text;
+        button.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(button, color);
+        button.Width = width;
+        button.Height = 31;
+        button.Enabled = false;
+        button.Click += async (_, _) => await action();
+    }
+
     private Control BuildActionBar()
     {
         var panel = new FlowLayoutPanel
@@ -1027,6 +1050,10 @@ internal sealed class MainForm : Form
         ConfigureSeekStepButton(_seekForwardFiveFramesButton, "+5 fr", () => SeekRelativeFramesAsync(5));
         ConfigureSeekStepButton(_seekBackOneFrameButton, "-1 fr", () => SeekRelativeFramesAsync(-1));
         ConfigureSeekStepButton(_seekForwardOneFrameButton, "+1 fr", () => SeekRelativeFramesAsync(1));
+        ConfigureTrimButton(_previousCueButton, "Prev Cue", 86, Color.FromArgb(52, 67, 82), () => CueRelativePlaylistItem(-1));
+        ConfigureTransportActionButton(_previousPlayButton, "Prev Play", 90, Color.FromArgb(63, 96, 135), () => PlayRelativePlaylistItemAsync(-1));
+        ConfigureTransportActionButton(_nextPlayButton, "Next Play", 90, Color.FromArgb(63, 96, 135), () => PlayRelativePlaylistItemAsync(1));
+        ConfigureTrimButton(_nextCueButton, "Next Cue", 86, Color.FromArgb(52, 67, 82), () => CueRelativePlaylistItem(1));
         ConfigureTrimButton(_markInButton, "Mark In", 78, Color.FromArgb(52, 67, 82), MarkTrimIn);
         ConfigureTrimButton(_markOutButton, "Mark Out", 84, Color.FromArgb(52, 67, 82), MarkTrimOut);
         ConfigureTrimButton(_addTrimmedToPlaylistButton, "Add Trimmed", 118, Color.FromArgb(39, 125, 87), AddTrimmedClipToPlaylist);
@@ -1047,6 +1074,13 @@ internal sealed class MainForm : Form
                 _markInButton,
                 _markOutButton,
                 _addTrimmedToPlaylistButton,
+            },
+            new Control[]
+            {
+                _previousCueButton,
+                _previousPlayButton,
+                _nextPlayButton,
+                _nextCueButton,
             },
             new Control[]
             {
@@ -1141,15 +1175,21 @@ internal sealed class MainForm : Form
         return panel;
     }
 
-    private Control BuildSeekActionGroup(int width, Control[] negativeControls, Control[] transportControls, Control[] positiveControls)
+    private Control BuildSeekActionGroup(
+        int width,
+        Control[] negativeControls,
+        Control[] transportControls,
+        Control[] playlistControls,
+        Control[] positiveControls)
     {
         var leftWidth = MeasureControlsWidth(negativeControls);
         var transportWidth = MeasureControlsWidth(transportControls);
+        var playlistWidth = MeasureControlsWidth(playlistControls);
         var rightWidth = MeasureControlsWidth(positiveControls);
         var panel = new Panel
         {
             Width = width,
-            Height = 92,
+            Height = 126,
             Margin = new Padding(0),
             BackColor = Color.FromArgb(30, 35, 40),
             Padding = new Padding(8, 3, 8, 5),
@@ -1157,12 +1197,15 @@ internal sealed class MainForm : Form
 
         var seekPanel = BuildPositionRow();
         seekPanel.Location = new Point(8, 5);
-        seekPanel.Size = new Size(width - 16, 39);
+        seekPanel.Size = new Size(width - 16, 35);
         seekPanel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
+
+        var playlistPanel = BuildSeekButtonPanel(playlistControls, playlistWidth);
+        playlistPanel.Location = new Point(Math.Max(0, (width - 16 - playlistWidth) / 2), 47);
 
         var buttonPanel = new Panel
         {
-            Location = new Point(8, 58),
+            Location = new Point(8, 87),
             Size = new Size(width - 16, 31),
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -1188,6 +1231,7 @@ internal sealed class MainForm : Form
         buttonPanel.Controls.Add(transportPanel);
         buttonPanel.Controls.Add(rightPanel);
         panel.Controls.Add(seekPanel);
+        panel.Controls.Add(playlistPanel);
         panel.Controls.Add(buttonPanel);
         return panel;
     }
@@ -1540,7 +1584,7 @@ internal sealed class MainForm : Form
         _playlistGrid.AllowUserToAddRows = false;
         _playlistGrid.AllowUserToDeleteRows = false;
         _playlistGrid.AllowUserToResizeRows = false;
-        _playlistGrid.ReadOnly = true;
+        _playlistGrid.ReadOnly = false;
         _playlistGrid.MultiSelect = false;
         _playlistGrid.RowHeadersVisible = false;
         _playlistGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
@@ -1582,6 +1626,16 @@ internal sealed class MainForm : Form
             Width = 92,
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
+        _playlistGrid.Columns.Add(new DataGridViewCheckBoxColumn
+        {
+            Name = "PlayEnabled",
+            HeaderText = "Play",
+            Width = 48,
+            TrueValue = true,
+            FalseValue = false,
+            ThreeState = false,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
         _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "Clip",
@@ -1611,6 +1665,16 @@ internal sealed class MainForm : Form
             Width = 76,
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
+        _playlistGrid.Columns.Add(new DataGridViewCheckBoxColumn
+        {
+            Name = "LoopEnabled",
+            HeaderText = "Loop",
+            Width = 52,
+            TrueValue = true,
+            FalseValue = false,
+            ThreeState = false,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+        });
         _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "EndTime",
@@ -1624,14 +1688,62 @@ internal sealed class MainForm : Form
             HeaderText = "FullPath",
             Visible = false,
         });
+        foreach (DataGridViewColumn column in _playlistGrid.Columns)
+        {
+            column.ReadOnly = column is not DataGridViewCheckBoxColumn;
+        }
 
         _playlistGrid.SelectionChanged -= PlaylistGrid_SelectionChanged;
         _playlistGrid.CellDoubleClick -= PlaylistGrid_CellDoubleClick;
         _playlistGrid.KeyDown -= PlaylistGrid_KeyDown;
+        _playlistGrid.CellMouseDown -= PlaylistGrid_CellMouseDown;
+        _playlistGrid.CurrentCellDirtyStateChanged -= PlaylistGrid_CurrentCellDirtyStateChanged;
+        _playlistGrid.CellValueChanged -= PlaylistGrid_CellValueChanged;
+        _playlistGrid.DataError -= PlaylistGrid_DataError;
         _playlistGrid.SelectionChanged += PlaylistGrid_SelectionChanged;
         _playlistGrid.CellDoubleClick += PlaylistGrid_CellDoubleClick;
         _playlistGrid.KeyDown += PlaylistGrid_KeyDown;
+        _playlistGrid.CellMouseDown += PlaylistGrid_CellMouseDown;
+        _playlistGrid.CurrentCellDirtyStateChanged += PlaylistGrid_CurrentCellDirtyStateChanged;
+        _playlistGrid.CellValueChanged += PlaylistGrid_CellValueChanged;
+        _playlistGrid.DataError += PlaylistGrid_DataError;
+        ConfigurePlaylistContextMenu();
         RefreshPlaylistGrid();
+    }
+
+    private void ConfigurePlaylistContextMenu()
+    {
+        _playlistContextMenu.Items.Clear();
+        _playlistMenuPlay.Click -= PlaylistMenuPlay_Click;
+        _playlistMenuPause.Click -= PlaylistMenuPause_Click;
+        _playlistMenuCue.Click -= PlaylistMenuCue_Click;
+        _playlistMenuCueNext.Click -= PlaylistMenuCueNext_Click;
+        _playlistMenuPlayNext.Click -= PlaylistMenuPlayNext_Click;
+        _playlistMenuCuePrevious.Click -= PlaylistMenuCuePrevious_Click;
+        _playlistMenuPlayPrevious.Click -= PlaylistMenuPlayPrevious_Click;
+        _playlistContextMenu.Opening -= PlaylistContextMenu_Opening;
+
+        _playlistMenuPlay.Click += PlaylistMenuPlay_Click;
+        _playlistMenuPause.Click += PlaylistMenuPause_Click;
+        _playlistMenuCue.Click += PlaylistMenuCue_Click;
+        _playlistMenuCueNext.Click += PlaylistMenuCueNext_Click;
+        _playlistMenuPlayNext.Click += PlaylistMenuPlayNext_Click;
+        _playlistMenuCuePrevious.Click += PlaylistMenuCuePrevious_Click;
+        _playlistMenuPlayPrevious.Click += PlaylistMenuPlayPrevious_Click;
+        _playlistContextMenu.Opening += PlaylistContextMenu_Opening;
+
+        _playlistContextMenu.Items.AddRange(
+            [
+                _playlistMenuPlay,
+                _playlistMenuPause,
+                new ToolStripSeparator(),
+                _playlistMenuCue,
+                _playlistMenuCueNext,
+                _playlistMenuPlayNext,
+                _playlistMenuCuePrevious,
+                _playlistMenuPlayPrevious,
+            ]);
+        _playlistGrid.ContextMenuStrip = _playlistContextMenu;
     }
 
     private void PlaylistGrid_SelectionChanged(object? sender, EventArgs e)
@@ -1639,9 +1751,152 @@ internal sealed class MainForm : Form
         UpdatePlaylistButtons();
     }
 
+    private void PlaylistContextMenu_Opening(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        var selectedIndex = GetSelectedPlaylistIndex();
+        var selectedCueable = selectedIndex.HasValue && IsPlaylistRowCueable(selectedIndex.Value);
+        var hasNext = FindRelativePlaylistIndex(1, selectedIndex).HasValue;
+        var hasPrevious = FindRelativePlaylistIndex(-1, selectedIndex).HasValue;
+
+        _playlistMenuPlay.Enabled = selectedCueable;
+        _playlistMenuPause.Text = _isPaused ? "Resume" : "Pause";
+        _playlistMenuPause.Enabled = _isPlaying;
+        _playlistMenuCue.Enabled = selectedCueable;
+        _playlistMenuCueNext.Enabled = hasNext;
+        _playlistMenuPlayNext.Enabled = hasNext;
+        _playlistMenuCuePrevious.Enabled = hasPrevious;
+        _playlistMenuPlayPrevious.Enabled = hasPrevious;
+    }
+
+    private async void PlaylistMenuPlay_Click(object? sender, EventArgs e)
+    {
+        await PlaySelectedPlaylistItemAsync();
+    }
+
+    private async void PlaylistMenuPause_Click(object? sender, EventArgs e)
+    {
+        await TogglePauseResumePlaybackAsync();
+    }
+
+    private void PlaylistMenuCue_Click(object? sender, EventArgs e)
+    {
+        CueSelectedPlaylistItem();
+    }
+
+    private void PlaylistMenuCueNext_Click(object? sender, EventArgs e)
+    {
+        CueRelativePlaylistItem(1, GetSelectedPlaylistIndex());
+    }
+
+    private async void PlaylistMenuPlayNext_Click(object? sender, EventArgs e)
+    {
+        await PlayRelativePlaylistItemAsync(1, GetSelectedPlaylistIndex());
+    }
+
+    private void PlaylistMenuCuePrevious_Click(object? sender, EventArgs e)
+    {
+        CueRelativePlaylistItem(-1, GetSelectedPlaylistIndex());
+    }
+
+    private async void PlaylistMenuPlayPrevious_Click(object? sender, EventArgs e)
+    {
+        await PlayRelativePlaylistItemAsync(-1, GetSelectedPlaylistIndex());
+    }
+
+    private void PlaylistGrid_CellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right ||
+            e.RowIndex < 0 ||
+            e.RowIndex >= _playlistGrid.Rows.Count)
+        {
+            return;
+        }
+
+        var columnIndex = e.ColumnIndex >= 0 ? e.ColumnIndex : GetFirstVisiblePlaylistColumnIndex();
+        if (columnIndex < 0)
+        {
+            return;
+        }
+
+        _playlistGrid.CurrentCell = _playlistGrid.Rows[e.RowIndex].Cells[columnIndex];
+        _playlistGrid.ClearSelection();
+        _playlistGrid.Rows[e.RowIndex].Selected = true;
+    }
+
+    private int GetFirstVisiblePlaylistColumnIndex()
+    {
+        foreach (DataGridViewColumn column in _playlistGrid.Columns)
+        {
+            if (column.Visible)
+            {
+                return column.Index;
+            }
+        }
+
+        return -1;
+    }
+
+    private void PlaylistGrid_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
+    {
+        if (_playlistGrid.IsCurrentCellDirty &&
+            _playlistGrid.CurrentCell?.OwningColumn is DataGridViewCheckBoxColumn)
+        {
+            _playlistGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        }
+    }
+
+    private void PlaylistGrid_CellValueChanged(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 ||
+            e.RowIndex >= _playlistItems.Count ||
+            e.ColumnIndex < 0 ||
+            e.ColumnIndex >= _playlistGrid.Columns.Count)
+        {
+            return;
+        }
+
+        var columnName = _playlistGrid.Columns[e.ColumnIndex].Name;
+        if (columnName is not "PlayEnabled" and not "LoopEnabled")
+        {
+            return;
+        }
+
+        var item = _playlistItems[e.RowIndex];
+        var value = _playlistGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value is bool checkedValue && checkedValue;
+        if (columnName == "PlayEnabled")
+        {
+            if (_playlistPlayingIndex == e.RowIndex && !value)
+            {
+                item.PlayEnabled = true;
+                RefreshPlaylistGrid(e.RowIndex);
+                SetStatus("Stop playback before disabling the playing row", Color.FromArgb(232, 181, 105));
+                return;
+            }
+
+            item.PlayEnabled = value;
+            if (!value && item.Status == PlaylistStatusNext)
+            {
+                item.Status = PlaylistStatusReady;
+            }
+
+            RefreshPlaylistGrid(e.RowIndex);
+            return;
+        }
+
+        item.LoopEnabled = value;
+        SetStatus(value ? "Playlist row loop enabled" : "Playlist row loop disabled", Color.FromArgb(130, 210, 164));
+    }
+
+    private static void PlaylistGrid_DataError(object? sender, DataGridViewDataErrorEventArgs e)
+    {
+        e.ThrowException = false;
+    }
+
     private async void PlaylistGrid_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
     {
-        if (e.RowIndex >= 0)
+        if (e.RowIndex >= 0 &&
+            e.ColumnIndex >= 0 &&
+            _playlistGrid.Columns[e.ColumnIndex] is not DataGridViewCheckBoxColumn)
         {
             await PlaySelectedPlaylistItemAsync();
         }
@@ -2029,6 +2284,120 @@ internal sealed class MainForm : Form
         RefreshPlaylistGrid(toIndex);
     }
 
+    private void CueRelativePlaylistItem(int direction, int? referenceIndex = null)
+    {
+        var index = FindRelativePlaylistIndex(direction, referenceIndex);
+        if (!index.HasValue)
+        {
+            SetStatus(direction > 0 ? "No next playlist row" : "No previous playlist row", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        CuePlaylistItem(index.Value);
+    }
+
+    private async Task PlayRelativePlaylistItemAsync(int direction, int? referenceIndex = null)
+    {
+        var index = FindRelativePlaylistIndex(direction, referenceIndex);
+        if (!index.HasValue)
+        {
+            SetStatus(direction > 0 ? "No next playlist row" : "No previous playlist row", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        await PlayPlaylistItemAsync(index.Value);
+    }
+
+    private void CueSelectedPlaylistItem()
+    {
+        var index = GetSelectedPlaylistIndex();
+        if (!index.HasValue)
+        {
+            SetStatus("Choose a playlist row first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        CuePlaylistItem(index.Value);
+    }
+
+    private void CuePlaylistItem(int index)
+    {
+        if (!IsPlaylistRowCueable(index))
+        {
+            SetStatus("Playlist row is unavailable", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var item = _playlistItems[index];
+        SelectMediaPath(item.FullPath);
+        _selectedStartOffset = item.TcIn;
+        if (item.SourceDuration.HasValue)
+        {
+            _selectedDurationPath = item.FullPath;
+            _selectedMediaDuration = item.SourceDuration.Value;
+            _selectedDurationUnavailable = false;
+        }
+
+        for (var i = 0; i < _playlistItems.Count; i++)
+        {
+            if (i == index && _playlistItems[i].Status != PlaylistStatusPlaying)
+            {
+                _playlistItems[i].Status = PlaylistStatusNext;
+            }
+            else if (_playlistItems[i].Status == PlaylistStatusNext)
+            {
+                _playlistItems[i].Status = PlaylistStatusReady;
+            }
+        }
+
+        RefreshPlaylistGrid(index);
+        UpdateDurationLabel();
+        SetStatus($"Cued row {index + 1}: {Path.GetFileName(item.FullPath)}", Color.FromArgb(130, 210, 164));
+    }
+
+    private int? FindRelativePlaylistIndex(int direction, int? referenceIndex = null)
+    {
+        if (direction == 0 || _playlistItems.Count == 0)
+        {
+            return null;
+        }
+
+        var reference = referenceIndex ?? GetPlaylistReferenceIndex();
+        var index = reference < 0
+            ? direction > 0 ? 0 : _playlistItems.Count - 1
+            : reference + Math.Sign(direction);
+
+        while (index >= 0 && index < _playlistItems.Count)
+        {
+            if (IsPlaylistRowCueable(index))
+            {
+                return index;
+            }
+
+            index += Math.Sign(direction);
+        }
+
+        return null;
+    }
+
+    private int GetPlaylistReferenceIndex()
+    {
+        if (_playlistPlayingIndex.HasValue)
+        {
+            return _playlistPlayingIndex.Value;
+        }
+
+        return GetSelectedPlaylistIndex() ?? -1;
+    }
+
+    private bool IsPlaylistRowCueable(int index)
+    {
+        return index >= 0 &&
+            index < _playlistItems.Count &&
+            _playlistItems[index].PlayEnabled &&
+            File.Exists(_playlistItems[index].FullPath);
+    }
+
     private async Task PlaySelectedPlaylistItemAsync()
     {
         var index = GetSelectedPlaylistIndex();
@@ -2053,6 +2422,13 @@ internal sealed class MainForm : Form
             _playlistItems[index].Status = PlaylistStatusMissing;
             RefreshPlaylistGrid(index);
             SetStatus("Playlist file missing", Color.FromArgb(229, 113, 105));
+            return;
+        }
+
+        if (!_playlistItems[index].PlayEnabled)
+        {
+            RefreshPlaylistGrid(index);
+            SetStatus("Playlist row is unchecked", Color.FromArgb(232, 181, 105));
             return;
         }
 
@@ -2081,11 +2457,13 @@ internal sealed class MainForm : Form
         _selectedStartOffset = item.TcIn;
         MarkPlaylistItemPlaying(index);
         AppendLog($"Starting playlist row {index + 1}: {Path.GetFileName(item.FullPath)}");
+        var playDuration = item.PlayDuration;
         await StartPlaybackAsync(
             dryRun: false,
             startOffset: item.TcIn,
-            playDuration: item.PlayDuration,
-            sourceDuration: item.SourceDuration);
+            playDuration: playDuration,
+            sourceDuration: item.SourceDuration,
+            playLoop: item.LoopEnabled && !playDuration.HasValue);
     }
 
     private void MarkPlaylistItemPlaying(int index)
@@ -2096,6 +2474,10 @@ internal sealed class MainForm : Form
             if (!File.Exists(_playlistItems[i].FullPath))
             {
                 _playlistItems[i].Status = PlaylistStatusMissing;
+            }
+            else if (!_playlistItems[i].PlayEnabled && _playlistItems[i].Status == PlaylistStatusNext)
+            {
+                _playlistItems[i].Status = PlaylistStatusReady;
             }
             else if (i == index)
             {
@@ -2144,7 +2526,7 @@ internal sealed class MainForm : Form
         for (var i = startIndex; i < _playlistItems.Count; i++)
         {
             var item = _playlistItems[i];
-            if (File.Exists(item.FullPath) && item.Status == PlaylistStatusPlayed)
+            if (item.PlayEnabled && File.Exists(item.FullPath) && item.Status == PlaylistStatusPlayed)
             {
                 item.Status = PlaylistStatusReady;
                 changed = true;
@@ -2169,6 +2551,17 @@ internal sealed class MainForm : Form
         int? nextToPlay = null;
         if (index >= 0 && index < _playlistItems.Count)
         {
+            if (completedNormally &&
+                _playlistItems[index].LoopEnabled &&
+                _playlistItems[index].PlayEnabled &&
+                File.Exists(_playlistItems[index].FullPath))
+            {
+                _playlistItems[index].Status = PlaylistStatusReady;
+                RefreshPlaylistGrid(index);
+                QueuePlaylistAutoNext(index);
+                return;
+            }
+
             _playlistItems[index].Status = completedNormally ? PlaylistStatusPlayed : PlaylistStatusReady;
             var next = FindNextPlayablePlaylistIndex(index + 1);
             if (completedNormally)
@@ -2220,7 +2613,7 @@ internal sealed class MainForm : Form
         for (var i = Math.Max(0, startIndex); i < _playlistItems.Count; i++)
         {
             var item = _playlistItems[i];
-            if (File.Exists(item.FullPath) && item.Status != PlaylistStatusPlayed)
+            if (item.PlayEnabled && File.Exists(item.FullPath) && item.Status != PlaylistStatusPlayed)
             {
                 return i;
             }
@@ -2234,7 +2627,7 @@ internal sealed class MainForm : Form
         var hasPlayableItem = false;
         foreach (var item in _playlistItems)
         {
-            if (!File.Exists(item.FullPath))
+            if (!item.PlayEnabled || !File.Exists(item.FullPath))
             {
                 continue;
             }
@@ -2253,7 +2646,7 @@ internal sealed class MainForm : Form
     {
         for (var i = 0; i < _playlistItems.Count; i++)
         {
-            if (File.Exists(_playlistItems[i].FullPath))
+            if (_playlistItems[i].PlayEnabled && File.Exists(_playlistItems[i].FullPath))
             {
                 return i;
             }
@@ -2279,10 +2672,12 @@ internal sealed class MainForm : Form
                 (i + 1).ToString(CultureInfo.InvariantCulture),
                 item.Status,
                 startText,
+                item.PlayEnabled,
                 GetMediaDisplayPath(item.FullPath),
                 FormatPlaylistTime(item.TcIn),
                 item.TcOut.HasValue ? FormatPlaylistTime(item.TcOut.Value) : "--",
                 duration.HasValue ? FormatPlaylistTime(duration.Value) : "--",
+                item.LoopEnabled,
                 endText,
                 item.FullPath);
 
@@ -2320,6 +2715,16 @@ internal sealed class MainForm : Form
             if (!File.Exists(item.FullPath))
             {
                 item.Status = PlaylistStatusMissing;
+                continue;
+            }
+
+            if (!item.PlayEnabled)
+            {
+                if (item.Status == PlaylistStatusNext || item.Status == PlaylistStatusPlaying)
+                {
+                    item.Status = PlaylistStatusReady;
+                }
+
                 continue;
             }
 
@@ -2432,13 +2837,23 @@ internal sealed class MainForm : Form
     {
         var selectedIndex = GetSelectedPlaylistIndex();
         var hasPlaylistSelection = selectedIndex.HasValue;
+        var selectedPlayable = selectedIndex.HasValue &&
+            selectedIndex.Value >= 0 &&
+            selectedIndex.Value < _playlistItems.Count &&
+            _playlistItems[selectedIndex.Value].PlayEnabled;
         var controlsEnabled = _playlistGrid.Enabled;
         _addToPlaylistButton.Enabled = controlsEnabled && (GetSelectedMediaGridPath() is not null || File.Exists(_inputPathBox.Text.Trim()));
-        _playPlaylistItemButton.Enabled = controlsEnabled && hasPlaylistSelection;
+        _playPlaylistItemButton.Enabled = controlsEnabled && hasPlaylistSelection && selectedPlayable;
         _removePlaylistItemButton.Enabled = controlsEnabled && hasPlaylistSelection;
         _movePlaylistItemUpButton.Enabled = controlsEnabled && selectedIndex is > 0;
         _movePlaylistItemDownButton.Enabled = controlsEnabled && selectedIndex.HasValue && selectedIndex.Value < _playlistItems.Count - 1;
         _clearPlaylistButton.Enabled = controlsEnabled && _playlistItems.Count > 0;
+        var hasPrevious = FindRelativePlaylistIndex(-1).HasValue;
+        var hasNext = FindRelativePlaylistIndex(1).HasValue;
+        _previousCueButton.Enabled = controlsEnabled && hasPrevious;
+        _previousPlayButton.Enabled = controlsEnabled && hasPrevious;
+        _nextPlayButton.Enabled = controlsEnabled && hasNext;
+        _nextCueButton.Enabled = controlsEnabled && hasNext;
         UpdateTrimControls();
     }
 
@@ -4842,7 +5257,8 @@ internal sealed class MainForm : Form
         TimeSpan? startOffset = null,
         bool startPaused = false,
         TimeSpan? playDuration = null,
-        TimeSpan? sourceDuration = null)
+        TimeSpan? sourceDuration = null,
+        bool playLoop = false)
     {
         if (_isPlaying)
         {
@@ -4854,7 +5270,7 @@ internal sealed class MainForm : Form
         {
             var previewOnly = PreviewOnlyMode;
             var pcAudio = PcAudioMode;
-            var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration);
+            var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration, playLoop);
             var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
             request = _deckLink.ApplyModeDefaults(request, selectedMode);
             var commandText = _sdkPlayer.FormatDecoderCommand(
@@ -5098,7 +5514,11 @@ internal sealed class MainForm : Form
         UpdateDurationLabel();
     }
 
-    private PlayRequest BuildRequest(bool useTestPattern, TimeSpan startOffset, TimeSpan? playDuration = null)
+    private PlayRequest BuildRequest(
+        bool useTestPattern,
+        TimeSpan startOffset,
+        TimeSpan? playDuration = null,
+        bool playLoop = false)
     {
         var inputPath = _inputPathBox.Text.Trim();
         if (!useTestPattern && string.IsNullOrWhiteSpace(inputPath))
@@ -5163,6 +5583,7 @@ internal sealed class MainForm : Form
             : isStillImage
                 ? DefaultStillDuration
                 : playDuration;
+        var loopPlayback = playLoop && !useTestPattern && !isStillImage;
 
         return new PlayRequest(
             GetFfmpegPath(),
@@ -5179,7 +5600,7 @@ internal sealed class MainForm : Form
             levelA,
             VideoFilter: null,
             AudioFilter: null,
-            false,
+            loopPlayback,
             useTestPattern || isStillImage,
             selectedMode?.IsInterlaced == true,
             selectedMode?.FieldOrder,
@@ -5639,6 +6060,10 @@ internal sealed class MainForm : Form
 
         public TimeSpan? SourceDuration { get; init; }
 
+        public bool PlayEnabled { get; set; } = true;
+
+        public bool LoopEnabled { get; set; }
+
         public string Status { get; set; } = PlaylistStatusReady;
 
         public TimeSpan? PlayDuration
@@ -5666,6 +6091,8 @@ internal sealed class MainForm : Form
                 TcIn = TcIn,
                 TcOut = TcOut,
                 SourceDuration = SourceDuration,
+                PlayEnabled = PlayEnabled,
+                LoopEnabled = LoopEnabled,
                 Status = Status,
             };
         }

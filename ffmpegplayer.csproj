@@ -32,6 +32,7 @@
 
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen.Bindings.DynamicallyLoaded" Version="7.0.0" />
+    <PackageReference Include="MediaInfo.Wrapper" Version="26.1.0" />
   </ItemGroup>
 
   <Target Name="PrepareFreshTimestampedBuild" BeforeTargets="BeforeBuild">
