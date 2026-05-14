@@ -61,6 +61,8 @@ internal sealed class MainForm : Form
     private readonly TextBox _mediaSearchBox = new();
     private readonly TreeView _mediaTree = new();
     private readonly DataGridView _mediaGrid = new();
+    private readonly ContextMenuStrip _mediaGridContextMenu = new();
+    private readonly ToolStripMenuItem _mediaGridMenuFileInfo = new("File Info");
     private readonly DataGridView _playlistGrid = new();
     private readonly ContextMenuStrip _playlistContextMenu = new();
     private readonly ToolStripMenuItem _playlistMenuPlay = new("Play");
@@ -70,6 +72,7 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _playlistMenuPlayNext = new("Play Next");
     private readonly ToolStripMenuItem _playlistMenuCuePrevious = new("Cue Prev");
     private readonly ToolStripMenuItem _playlistMenuPlayPrevious = new("Play Prev");
+    private readonly ToolStripMenuItem _playlistMenuFileInfo = new("File Info");
     private readonly Button _addToPlaylistButton = new();
     private readonly Button _removePlaylistItemButton = new();
     private readonly Button _movePlaylistItemUpButton = new();
@@ -206,7 +209,7 @@ internal sealed class MainForm : Form
         Text = GetExecutableWindowTitle();
         StartPosition = FormStartPosition.Manual;
         FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        MaximizeBox = true;
         SetFixedClientHeight(CollapsedClientHeight);
         PlaceOnPrimaryScreen();
         BackColor = Color.FromArgb(22, 25, 29);
@@ -451,11 +454,16 @@ internal sealed class MainForm : Form
 
     private void SetFixedClientHeight(int clientHeight)
     {
+        var fixedClientSize = new Size(FixedClientWidth, clientHeight);
         MinimumSize = Size.Empty;
         MaximumSize = Size.Empty;
-        ClientSize = new Size(FixedClientWidth, clientHeight);
-        MinimumSize = Size;
-        MaximumSize = Size;
+        if (WindowState == FormWindowState.Normal)
+        {
+            ClientSize = fixedClientSize;
+        }
+
+        MinimumSize = SizeFromClientSize(fixedClientSize);
+        MaximumSize = Size.Empty;
     }
 
     private void PlaceOnPrimaryScreen()
@@ -1721,6 +1729,7 @@ internal sealed class MainForm : Form
         _playlistMenuPlayNext.Click -= PlaylistMenuPlayNext_Click;
         _playlistMenuCuePrevious.Click -= PlaylistMenuCuePrevious_Click;
         _playlistMenuPlayPrevious.Click -= PlaylistMenuPlayPrevious_Click;
+        _playlistMenuFileInfo.Click -= PlaylistMenuFileInfo_Click;
         _playlistContextMenu.Opening -= PlaylistContextMenu_Opening;
 
         _playlistMenuPlay.Click += PlaylistMenuPlay_Click;
@@ -1730,6 +1739,7 @@ internal sealed class MainForm : Form
         _playlistMenuPlayNext.Click += PlaylistMenuPlayNext_Click;
         _playlistMenuCuePrevious.Click += PlaylistMenuCuePrevious_Click;
         _playlistMenuPlayPrevious.Click += PlaylistMenuPlayPrevious_Click;
+        _playlistMenuFileInfo.Click += PlaylistMenuFileInfo_Click;
         _playlistContextMenu.Opening += PlaylistContextMenu_Opening;
 
         _playlistContextMenu.Items.AddRange(
@@ -1742,6 +1752,8 @@ internal sealed class MainForm : Form
                 _playlistMenuPlayNext,
                 _playlistMenuCuePrevious,
                 _playlistMenuPlayPrevious,
+                new ToolStripSeparator(),
+                _playlistMenuFileInfo,
             ]);
         _playlistGrid.ContextMenuStrip = _playlistContextMenu;
     }
@@ -1766,6 +1778,10 @@ internal sealed class MainForm : Form
         _playlistMenuPlayNext.Enabled = hasNext;
         _playlistMenuCuePrevious.Enabled = hasPrevious;
         _playlistMenuPlayPrevious.Enabled = hasPrevious;
+        _playlistMenuFileInfo.Enabled = selectedIndex.HasValue &&
+            selectedIndex.Value >= 0 &&
+            selectedIndex.Value < _playlistItems.Count &&
+            File.Exists(_playlistItems[selectedIndex.Value].FullPath);
     }
 
     private async void PlaylistMenuPlay_Click(object? sender, EventArgs e)
@@ -1801,6 +1817,20 @@ internal sealed class MainForm : Form
     private async void PlaylistMenuPlayPrevious_Click(object? sender, EventArgs e)
     {
         await PlayRelativePlaylistItemAsync(-1, GetSelectedPlaylistIndex());
+    }
+
+    private void PlaylistMenuFileInfo_Click(object? sender, EventArgs e)
+    {
+        var selectedIndex = GetSelectedPlaylistIndex();
+        if (!selectedIndex.HasValue ||
+            selectedIndex.Value < 0 ||
+            selectedIndex.Value >= _playlistItems.Count)
+        {
+            SetStatus("Choose a playlist row first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        OpenMediaInfoForm(_playlistItems[selectedIndex.Value].FullPath);
     }
 
     private void PlaylistGrid_CellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
@@ -2322,13 +2352,32 @@ internal sealed class MainForm : Form
 
     private void CuePlaylistItem(int index)
     {
+        _ = CuePlaylistItemAsync(index);
+    }
+
+    private async Task CuePlaylistItemAsync(int index)
+    {
+        try
+        {
+            await CuePlaylistItemCoreAsync(index);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Cue failed: {ex.Message}");
+            SetStatus("Cue failed", Color.FromArgb(229, 113, 105));
+        }
+    }
+
+    private async Task CuePlaylistItemCoreAsync(int index)
+    {
         if (!IsPlaylistRowCueable(index))
         {
             SetStatus("Playlist row is unavailable", Color.FromArgb(232, 181, 105));
             return;
         }
 
-        var item = _playlistItems[index];
+        var item = _playlistItems[index].Snapshot();
+        await StopActivePlaybackForReplacementAsync();
         SelectMediaPath(item.FullPath);
         _selectedStartOffset = item.TcIn;
         if (item.SourceDuration.HasValue)
@@ -2338,21 +2387,19 @@ internal sealed class MainForm : Form
             _selectedDurationUnavailable = false;
         }
 
-        for (var i = 0; i < _playlistItems.Count; i++)
-        {
-            if (i == index && _playlistItems[i].Status != PlaylistStatusPlaying)
-            {
-                _playlistItems[i].Status = PlaylistStatusNext;
-            }
-            else if (_playlistItems[i].Status == PlaylistStatusNext)
-            {
-                _playlistItems[i].Status = PlaylistStatusReady;
-            }
-        }
+        RearmPlaylistForManualPlay(index);
+        MarkPlaylistItemPlaying(index);
+        AppendLog($"Cueing playlist row {index + 1} paused: {Path.GetFileName(item.FullPath)}");
+        SetStatus($"Cueing row {index + 1}", Color.FromArgb(126, 188, 226));
 
-        RefreshPlaylistGrid(index);
-        UpdateDurationLabel();
-        SetStatus($"Cued row {index + 1}: {Path.GetFileName(item.FullPath)}", Color.FromArgb(130, 210, 164));
+        var playDuration = item.PlayDuration;
+        await StartPlaybackAsync(
+            dryRun: false,
+            startOffset: item.TcIn,
+            startPaused: true,
+            playDuration: playDuration,
+            sourceDuration: item.SourceDuration,
+            playLoop: item.LoopEnabled && !playDuration.HasValue);
     }
 
     private int? FindRelativePlaylistIndex(int direction, int? referenceIndex = null)
@@ -2434,24 +2481,7 @@ internal sealed class MainForm : Form
 
         RearmPlaylistForManualPlay(index);
         var item = _playlistItems[index].Snapshot();
-        if (_isPlaying)
-        {
-            _switchingPlayback = true;
-            try
-            {
-                var stoppedTask = _playbackStoppedSignal?.Task;
-                PreserveVideoOutputForReplacement();
-                StopPlayback();
-                if (stoppedTask is not null)
-                {
-                    await stoppedTask;
-                }
-            }
-            finally
-            {
-                _switchingPlayback = false;
-            }
-        }
+        await StopActivePlaybackForReplacementAsync();
 
         SelectMediaPath(item.FullPath);
         _selectedStartOffset = item.TcIn;
@@ -2464,6 +2494,30 @@ internal sealed class MainForm : Form
             playDuration: playDuration,
             sourceDuration: item.SourceDuration,
             playLoop: item.LoopEnabled && !playDuration.HasValue);
+    }
+
+    private async Task StopActivePlaybackForReplacementAsync()
+    {
+        if (!_isPlaying)
+        {
+            return;
+        }
+
+        _switchingPlayback = true;
+        try
+        {
+            var stoppedTask = _playbackStoppedSignal?.Task;
+            PreserveVideoOutputForReplacement();
+            StopPlayback();
+            if (stoppedTask is not null)
+            {
+                await stoppedTask;
+            }
+        }
+        finally
+        {
+            _switchingPlayback = false;
+        }
     }
 
     private void MarkPlaylistItemPlaying(int index)
@@ -2925,9 +2979,25 @@ internal sealed class MainForm : Form
         _mediaGrid.SelectionChanged -= MediaGrid_SelectionChanged;
         _mediaGrid.CellDoubleClick -= MediaGrid_CellDoubleClick;
         _mediaGrid.KeyDown -= MediaGrid_KeyDown;
+        _mediaGrid.CellMouseDown -= MediaGrid_CellMouseDown;
         _mediaGrid.SelectionChanged += MediaGrid_SelectionChanged;
         _mediaGrid.CellDoubleClick += MediaGrid_CellDoubleClick;
         _mediaGrid.KeyDown += MediaGrid_KeyDown;
+        _mediaGrid.CellMouseDown += MediaGrid_CellMouseDown;
+        ConfigureMediaGridContextMenu();
+    }
+
+    private void ConfigureMediaGridContextMenu()
+    {
+        _mediaGridContextMenu.Items.Clear();
+        _mediaGridMenuFileInfo.Click -= MediaGridMenuFileInfo_Click;
+        _mediaGridContextMenu.Opening -= MediaGridContextMenu_Opening;
+
+        _mediaGridMenuFileInfo.Click += MediaGridMenuFileInfo_Click;
+        _mediaGridContextMenu.Opening += MediaGridContextMenu_Opening;
+
+        _mediaGridContextMenu.Items.Add(_mediaGridMenuFileInfo);
+        _mediaGrid.ContextMenuStrip = _mediaGridContextMenu;
     }
 
     private void LoadMediaTree()
@@ -3193,6 +3263,69 @@ internal sealed class MainForm : Form
             e.SuppressKeyPress = true;
             await PlaySelectedMediaGridAsync();
         }
+    }
+
+    private void MediaGrid_CellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right ||
+            e.RowIndex < 0 ||
+            e.RowIndex >= _mediaGrid.Rows.Count)
+        {
+            return;
+        }
+
+        var columnIndex = e.ColumnIndex >= 0 ? e.ColumnIndex : GetFirstVisibleMediaGridColumnIndex();
+        if (columnIndex < 0)
+        {
+            return;
+        }
+
+        _mediaGrid.CurrentCell = _mediaGrid.Rows[e.RowIndex].Cells[columnIndex];
+        _mediaGrid.ClearSelection();
+        _mediaGrid.Rows[e.RowIndex].Selected = true;
+    }
+
+    private int GetFirstVisibleMediaGridColumnIndex()
+    {
+        foreach (DataGridViewColumn column in _mediaGrid.Columns)
+        {
+            if (column.Visible)
+            {
+                return column.Index;
+            }
+        }
+
+        return -1;
+    }
+
+    private void MediaGridContextMenu_Opening(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        _mediaGridMenuFileInfo.Enabled = GetSelectedMediaGridPath() is not null;
+    }
+
+    private void MediaGridMenuFileInfo_Click(object? sender, EventArgs e)
+    {
+        var path = GetSelectedMediaGridPath();
+        if (path is null)
+        {
+            SetStatus("Choose a media file first", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        OpenMediaInfoForm(path);
+    }
+
+    private void OpenMediaInfoForm(string path)
+    {
+        if (!File.Exists(path))
+        {
+            SetStatus("File missing", Color.FromArgb(229, 113, 105));
+            return;
+        }
+
+        var infoForm = new MediaInfoForm(path);
+        infoForm.Show(this);
+        AppendLog($"Opened MediaInfo for {Path.GetFileName(path)}");
     }
 
     private string? GetSelectedMediaGridPath()

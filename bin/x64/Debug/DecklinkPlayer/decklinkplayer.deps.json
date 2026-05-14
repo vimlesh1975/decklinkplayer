@@ -10,6 +10,7 @@
       "decklinkplayer/1.0.0": {
         "dependencies": {
           "FFmpeg.AutoGen.Bindings.DynamicallyLoaded": "7.0.0",
+          "MediaInfo.Wrapper.Core": "26.1.0",
           "DeckLinkAPI.Interop": "1.0.0.0"
         },
         "runtime": {
@@ -32,6 +33,65 @@
           "lib/netstandard2.1/FFmpeg.AutoGen.Bindings.DynamicallyLoaded.dll": {
             "assemblyVersion": "7.0.0.0",
             "fileVersion": "7.0.0.0"
+          }
+        }
+      },
+      "MediaInfo.Core.Native/26.1.0": {
+        "native": {
+          "runtimes/win-x64/native/brotlicommon.dll": {
+            "fileVersion": "0.0.0.0"
+          },
+          "runtimes/win-x64/native/brotlidec.dll": {
+            "fileVersion": "0.0.0.0"
+          },
+          "runtimes/win-x64/native/brotlienc.dll": {
+            "fileVersion": "0.0.0.0"
+          },
+          "runtimes/win-x64/native/libcrypto-3-x64.dll": {
+            "fileVersion": "3.6.1.0"
+          },
+          "runtimes/win-x64/native/libcurl.dll": {
+            "fileVersion": "8.19.1.0"
+          },
+          "runtimes/win-x64/native/libmediainfo.dll": {
+            "fileVersion": "26.1.0.0"
+          },
+          "runtimes/win-x64/native/libssh2.dll": {
+            "fileVersion": "1.11.1.0"
+          },
+          "runtimes/win-x64/native/libssl-3-x64.dll": {
+            "fileVersion": "3.6.1.0"
+          }
+        }
+      },
+      "MediaInfo.Wrapper.Core/26.1.0": {
+        "dependencies": {
+          "MediaInfo.Core.Native": "26.1.0",
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.5"
+        },
+        "runtime": {
+          "lib/net10.0/MediaInfo.Wrapper.Core.dll": {
+            "assemblyVersion": "26.1.0.0",
+            "fileVersion": "26.1.0.0"
+          }
+        }
+      },
+      "Microsoft.Extensions.DependencyInjection.Abstractions/10.0.5": {
+        "runtime": {
+          "lib/net10.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll": {
+            "assemblyVersion": "10.0.0.0",
+            "fileVersion": "10.0.526.15411"
+          }
+        }
+      },
+      "Microsoft.Extensions.Logging.Abstractions/10.0.5": {
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.5"
+        },
+        "runtime": {
+          "lib/net10.0/Microsoft.Extensions.Logging.Abstractions.dll": {
+            "assemblyVersion": "10.0.0.0",
+            "fileVersion": "10.0.526.15411"
           }
         }
       },
@@ -64,6 +124,34 @@
       "sha512": "sha512-Tz55+ibHU9rOtrfwV/UwNmF1RRrlrtR696NdT2CRmpjVE1cp5F7FtRAdE3qx83eGxn34Q0G1MgBj7L2+TV+53g==",
       "path": "ffmpeg.autogen.bindings.dynamicallyloaded/7.0.0",
       "hashPath": "ffmpeg.autogen.bindings.dynamicallyloaded.7.0.0.nupkg.sha512"
+    },
+    "MediaInfo.Core.Native/26.1.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-5Hr//VaBCsmDqjcj9uVEsHL2Y516HhG4uygeQUAFTltT1xAynsRr5fI7iSK6yWmgka2MsYi1GJ8wKPw03VhUQQ==",
+      "path": "mediainfo.core.native/26.1.0",
+      "hashPath": "mediainfo.core.native.26.1.0.nupkg.sha512"
+    },
+    "MediaInfo.Wrapper.Core/26.1.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-Q9l7s48pNqJURMZaVUi4d58z2gIQjtq+JL08sYJDa575EKz4+Um1neGiaBfqa/9KY1fFWLXTl9JY/JbCOU8D5A==",
+      "path": "mediainfo.wrapper.core/26.1.0",
+      "hashPath": "mediainfo.wrapper.core.26.1.0.nupkg.sha512"
+    },
+    "Microsoft.Extensions.DependencyInjection.Abstractions/10.0.5": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-iVMtq9eRvzyhx8949EGT0OCYJfXi737SbRVzWXE5GrOgGj5AaZ9eUuxA/BSUfmOMALKn/g8KfFaNQw0eiB3lyA==",
+      "path": "microsoft.extensions.dependencyinjection.abstractions/10.0.5",
+      "hashPath": "microsoft.extensions.dependencyinjection.abstractions.10.0.5.nupkg.sha512"
+    },
+    "Microsoft.Extensions.Logging.Abstractions/10.0.5": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-9HOdqlDtPptVcmKAjsQ/Nr5Rxfq6FMYLdhvZh1lVmeKR738qeYecQD7+ldooXf+u2KzzR1kafSphWngIM3C6ug==",
+      "path": "microsoft.extensions.logging.abstractions/10.0.5",
+      "hashPath": "microsoft.extensions.logging.abstractions.10.0.5.nupkg.sha512"
     },
     "DeckLinkAPI.Interop/1.0.0.0": {
       "type": "reference",
