@@ -207,8 +207,9 @@ internal sealed class MainForm : Form
     private readonly Label _currentTimeLabel = new();
     private readonly Label _positionStartLabel = new();
     private readonly Label _positionEndLabel = new();
-    private readonly TrackBar _positionBar = new();
-    private readonly SeekRangeHighlightOverlay _seekRangeHighlight = new();
+    private readonly SeekBarControl _positionBar = new();
+    private readonly List<Process> _externalFfplayProcesses = new();
+    private readonly object _externalFfplayLock = new();
     private readonly System.Windows.Forms.Timer _mediaSearchTimer = new() { Interval = 350 };
     private readonly System.Windows.Forms.Timer _durationProbeTimer = new() { Interval = 350 };
     private readonly System.Windows.Forms.Timer _playbackPositionTimer = new() { Interval = 500 };
@@ -360,6 +361,7 @@ internal sealed class MainForm : Form
             _scrubSeekTimer.Stop();
             _cpuUsageTimer.Stop();
             DisposeCpuUsageSampling();
+            StopExternalFfplayProcesses();
             ExitNativeSeekPreviewMode(setStopped: false);
             ExitScrubPreviewMode(holdForReplacement: false, setStopped: false);
             DisposeAppPreviewImage();
@@ -1437,6 +1439,7 @@ internal sealed class MainForm : Form
         _positionBar.Maximum = 1;
         _positionBar.Value = 0;
         _positionBar.TickStyle = TickStyle.None;
+        _positionBar.DarkMode = _darkMode;
         _positionBar.Enabled = false;
         _positionBar.MouseDown += PositionBar_MouseDown;
         _positionBar.MouseUp += PositionBar_MouseUp;
@@ -1457,13 +1460,7 @@ internal sealed class MainForm : Form
             Padding = new Padding(0),
             BackColor = Color.FromArgb(30, 35, 40),
         };
-        _seekRangeHighlight.Dock = DockStyle.Fill;
-        _seekRangeHighlight.Margin = new Padding(0);
-        _seekRangeHighlight.Visible = false;
-        _seekRangeHighlight.DarkMode = _darkMode;
         positionBarHost.Controls.Add(_positionBar);
-        positionBarHost.Controls.Add(_seekRangeHighlight);
-        _seekRangeHighlight.BringToFront();
         positionBarHost.Resize += (_, _) => UpdateSeekRangeHighlight();
 
         panel.Controls.Add(_positionStartLabel, 0, 0);
@@ -2286,7 +2283,7 @@ internal sealed class MainForm : Form
         ApplyTreeTheme(_mediaTree, dark);
         ApplyContextMenuTheme();
         ApplyToolTipTheme(_buttonToolTip, dark);
-        _seekRangeHighlight.DarkMode = dark;
+        _positionBar.DarkMode = dark;
 
         var selectedIndex = GetSelectedPlaylistIndex();
         RefreshPlaylistGrid(selectedIndex);
@@ -4809,18 +4806,87 @@ internal sealed class MainForm : Form
 
         try
         {
-            Process.Start(new ProcessStartInfo
+            var process = Process.Start(new ProcessStartInfo
             {
                 FileName = playerPath,
                 UseShellExecute = false,
                 ArgumentList = { path },
             });
+            TrackExternalFfplayProcess(process, playerName);
             SetStatus($"Opened in {playerName}", Color.FromArgb(130, 210, 164));
         }
         catch (Exception ex)
         {
             AppendLog($"{playerName} launch failed: {ex.Message}");
             SetStatus($"{playerName} launch failed", Color.FromArgb(229, 113, 105));
+        }
+    }
+
+    private void TrackExternalFfplayProcess(Process? process, string playerName)
+    {
+        if (process is null ||
+            !string.Equals(playerName, "ffplay", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        try
+        {
+            if (process.HasExited)
+            {
+                process.Dispose();
+                return;
+            }
+
+            process.EnableRaisingEvents = true;
+            process.Exited += ExternalFfplayProcess_Exited;
+            lock (_externalFfplayLock)
+            {
+                _externalFfplayProcesses.Add(process);
+            }
+        }
+        catch
+        {
+            process.Dispose();
+        }
+    }
+
+    private void ExternalFfplayProcess_Exited(object? sender, EventArgs e)
+    {
+        if (sender is not Process process)
+        {
+            return;
+        }
+
+        lock (_externalFfplayLock)
+        {
+            _externalFfplayProcesses.Remove(process);
+        }
+
+        process.Exited -= ExternalFfplayProcess_Exited;
+        process.Dispose();
+    }
+
+    private void StopExternalFfplayProcesses()
+    {
+        List<Process> processes;
+        lock (_externalFfplayLock)
+        {
+            processes = _externalFfplayProcesses.ToList();
+            _externalFfplayProcesses.Clear();
+        }
+
+        foreach (var process in processes)
+        {
+            try
+            {
+                process.Exited -= ExternalFfplayProcess_Exited;
+                TryKillProcess(process);
+            }
+            finally
+            {
+                process.Dispose();
+            }
         }
     }
 
@@ -7937,7 +8003,9 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var ratio = Math.Clamp((double)x / _positionBar.Width, 0, 1);
+        var trackLeft = 10;
+        var trackWidth = Math.Max(1, _positionBar.Width - trackLeft * 2);
+        var ratio = Math.Clamp((x - trackLeft) / (double)trackWidth, 0, 1);
         var value = (int)Math.Round(_positionBar.Minimum + ratio * (_positionBar.Maximum - _positionBar.Minimum));
         _positionBar.Value = Math.Clamp(value, _positionBar.Minimum, _positionBar.Maximum);
     }
@@ -8629,11 +8697,11 @@ internal sealed class MainForm : Form
     {
         if (!TryGetSeekRangeHighlight(out var startRatio, out var endRatio))
         {
-            _seekRangeHighlight.ClearRange();
+            _positionBar.ClearRange();
             return;
         }
 
-        _seekRangeHighlight.SetRange(startRatio, endRatio);
+        _positionBar.SetRange(startRatio, endRatio);
     }
 
     private bool TryGetSeekRangeHighlight(out double startRatio, out double endRatio)
@@ -8677,7 +8745,7 @@ internal sealed class MainForm : Form
         _positionBar.Enabled = enabled;
         if (!enabled)
         {
-            _seekRangeHighlight.ClearRange();
+            _positionBar.ClearRange();
         }
 
         _seekBackOneSecondButton.Enabled = enabled;
@@ -10162,25 +10230,93 @@ internal sealed class MainForm : Form
         }
     }
 
-    private sealed class SeekRangeHighlightOverlay : Control
+    private sealed class SeekBarControl : Control
     {
-        private const int WM_NCHITTEST = 0x0084;
-        private const int HTTRANSPARENT = -1;
-        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private int _minimum;
+        private int _maximum = 1;
+        private int _value;
+        private int _tickFrequency = 1;
+        private bool _rangeVisible;
         private double _startRatio;
         private double _endRatio;
         private bool _darkMode = true;
+        private bool _dragging;
 
-        public SeekRangeHighlightOverlay()
+        public SeekBarControl()
         {
             SetStyle(
                 ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.ResizeRedraw |
                 ControlStyles.UserPaint |
-                ControlStyles.SupportsTransparentBackColor,
+                ControlStyles.Selectable,
                 true);
-            BackColor = Color.Transparent;
+            BackColor = Color.FromArgb(30, 35, 40);
+            TabStop = true;
         }
+
+        public event EventHandler? Scroll;
+
+        [System.ComponentModel.Browsable(false)]
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public int Minimum
+        {
+            get => _minimum;
+            set
+            {
+                _minimum = value;
+                if (_maximum < _minimum)
+                {
+                    _maximum = _minimum;
+                }
+
+                Value = _value;
+                Invalidate();
+            }
+        }
+
+        [System.ComponentModel.Browsable(false)]
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public int Maximum
+        {
+            get => _maximum;
+            set
+            {
+                _maximum = Math.Max(value, _minimum);
+                Value = _value;
+                Invalidate();
+            }
+        }
+
+        [System.ComponentModel.Browsable(false)]
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public int Value
+        {
+            get => _value;
+            set
+            {
+                var normalized = Math.Clamp(value, _minimum, _maximum);
+                if (_value == normalized)
+                {
+                    return;
+                }
+
+                _value = normalized;
+                Invalidate();
+            }
+        }
+
+        [System.ComponentModel.Browsable(false)]
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public int TickFrequency
+        {
+            get => _tickFrequency;
+            set => _tickFrequency = Math.Max(1, value);
+        }
+
+        [System.ComponentModel.Browsable(false)]
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        public TickStyle TickStyle { get; set; } = TickStyle.None;
 
         [System.ComponentModel.Browsable(false)]
         [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
@@ -10189,23 +10325,9 @@ internal sealed class MainForm : Form
             get => _darkMode;
             set
             {
-                if (_darkMode == value)
-                {
-                    return;
-                }
-
                 _darkMode = value;
+                BackColor = _darkMode ? Color.FromArgb(30, 35, 40) : Color.FromArgb(236, 241, 245);
                 Invalidate();
-            }
-        }
-
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                var createParams = base.CreateParams;
-                createParams.ExStyle |= WS_EX_TRANSPARENT;
-                return createParams;
             }
         }
 
@@ -10213,56 +10335,192 @@ internal sealed class MainForm : Form
         {
             _startRatio = Math.Clamp(startRatio, 0d, 1d);
             _endRatio = Math.Clamp(endRatio, 0d, 1d);
-            Visible = _endRatio > _startRatio;
+            _rangeVisible = _endRatio > _startRatio;
             Invalidate();
         }
 
         public void ClearRange()
         {
-            if (!Visible)
-            {
-                return;
-            }
-
-            Visible = false;
+            _rangeVisible = false;
             Invalidate();
         }
 
-        protected override void OnPaintBackground(PaintEventArgs pevent)
+        protected override bool IsInputKey(Keys keyData)
         {
+            return keyData is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageUp or Keys.PageDown ||
+                base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            var oldValue = Value;
+            var step = Math.Max(1, _tickFrequency / 10);
+            var pageStep = Math.Max(step, _tickFrequency);
+            switch (e.KeyCode)
+            {
+                case Keys.Left:
+                case Keys.Down:
+                    Value -= step;
+                    break;
+                case Keys.Right:
+                case Keys.Up:
+                    Value += step;
+                    break;
+                case Keys.PageDown:
+                    Value -= pageStep;
+                    break;
+                case Keys.PageUp:
+                    Value += pageStep;
+                    break;
+                case Keys.Home:
+                    Value = Minimum;
+                    break;
+                case Keys.End:
+                    Value = Maximum;
+                    break;
+                default:
+                    base.OnKeyDown(e);
+                    return;
+            }
+
+            e.Handled = true;
+            if (Value != oldValue)
+            {
+                Scroll?.Invoke(this, EventArgs.Empty);
+            }
+
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            Focus();
+            if (e.Button == MouseButtons.Left)
+            {
+                _dragging = true;
+                SetValueFromMouse(e.X, raiseScroll: true);
+            }
+
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (_dragging)
+            {
+                SetValueFromMouse(e.X, raiseScroll: true);
+            }
+
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                SetValueFromMouse(e.X, raiseScroll: true);
+                _dragging = false;
+            }
+
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            Invalidate();
+            base.OnEnabledChanged(e);
+        }
+
+        private void SetValueFromMouse(int x, bool raiseScroll)
+        {
+            var track = GetTrackBounds();
+            var ratio = track.Width <= 0
+                ? 0d
+                : Math.Clamp((x - track.Left) / (double)track.Width, 0d, 1d);
+            var oldValue = Value;
+            Value = (int)Math.Round(_minimum + ratio * (_maximum - _minimum));
+            if (raiseScroll && Value != oldValue)
+            {
+                Scroll?.Invoke(this, EventArgs.Empty);
+            }
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            base.OnPaint(e);
-            if (!Visible || _endRatio <= _startRatio || Width <= 28 || Height <= 8)
+            e.Graphics.Clear(BackColor);
+            if (Width <= 28 || Height <= 8)
             {
                 return;
             }
 
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            var trackLeft = 12;
-            var trackRight = Width - 12;
-            var trackWidth = Math.Max(1, trackRight - trackLeft);
-            var x = trackLeft + (int)Math.Round(_startRatio * trackWidth);
-            var right = trackLeft + (int)Math.Round(_endRatio * trackWidth);
-            var y = Height / 2 - 5;
-            var rectangle = new Rectangle(x, y, Math.Max(3, right - x), 9);
-            using var brush = new SolidBrush(_darkMode ? Color.FromArgb(50, 166, 111) : Color.FromArgb(63, 143, 96));
-            using var pen = new Pen(_darkMode ? Color.FromArgb(106, 220, 159) : Color.FromArgb(34, 116, 72));
-            e.Graphics.FillRectangle(brush, rectangle);
-            e.Graphics.DrawRectangle(pen, rectangle);
+            var track = GetTrackBounds();
+            var trackRadius = track.Height / 2;
+            using var baseBrush = new SolidBrush(Enabled
+                ? _darkMode ? Color.FromArgb(70, 80, 88) : Color.FromArgb(188, 198, 207)
+                : _darkMode ? Color.FromArgb(48, 55, 61) : Color.FromArgb(210, 216, 222));
+            FillRoundedRectangle(e.Graphics, baseBrush, track, trackRadius);
+
+            if (_rangeVisible)
+            {
+                var rangeLeft = track.Left + (int)Math.Round(_startRatio * track.Width);
+                var rangeRight = track.Left + (int)Math.Round(_endRatio * track.Width);
+                var rangeRect = new Rectangle(rangeLeft, track.Top, Math.Max(4, rangeRight - rangeLeft), track.Height);
+                using var rangeBrush = new SolidBrush(Enabled
+                    ? _darkMode ? Color.FromArgb(224, 159, 57) : Color.FromArgb(230, 150, 45)
+                    : _darkMode ? Color.FromArgb(108, 91, 63) : Color.FromArgb(205, 185, 156));
+                FillRoundedRectangle(e.Graphics, rangeBrush, rangeRect, trackRadius);
+            }
+
+            var valueRatio = _maximum <= _minimum
+                ? 0d
+                : Math.Clamp((_value - _minimum) / (double)(_maximum - _minimum), 0d, 1d);
+            var thumbX = track.Left + (int)Math.Round(valueRatio * track.Width);
+            using var progressBrush = new SolidBrush(Enabled
+                ? _darkMode ? Color.FromArgb(62, 135, 210) : Color.FromArgb(55, 117, 178)
+                : _darkMode ? Color.FromArgb(76, 88, 99) : Color.FromArgb(180, 190, 200));
+            var progressRect = new Rectangle(track.Left, track.Top, Math.Max(0, thumbX - track.Left), track.Height);
+            if (progressRect.Width > 0)
+            {
+                FillRoundedRectangle(e.Graphics, progressBrush, progressRect, trackRadius);
+            }
+
+            var thumbRect = new Rectangle(thumbX - 6, track.Top - 7, 12, track.Height + 14);
+            using var thumbBrush = new SolidBrush(Enabled
+                ? _darkMode ? Color.FromArgb(240, 247, 252) : Color.FromArgb(25, 36, 46)
+                : _darkMode ? Color.FromArgb(128, 138, 146) : Color.FromArgb(145, 154, 162));
+            using var thumbBorder = new Pen(_darkMode ? Color.FromArgb(28, 36, 44) : Color.White, 2f);
+            FillRoundedRectangle(e.Graphics, thumbBrush, thumbRect, 5);
+            e.Graphics.DrawRectangle(thumbBorder, thumbRect);
         }
 
-        protected override void WndProc(ref Message m)
+        private Rectangle GetTrackBounds()
         {
-            if (m.Msg == WM_NCHITTEST)
+            var width = Math.Max(1, Width - 20);
+            return new Rectangle(10, Math.Max(2, Height / 2 - 4), width, 8);
+        }
+
+        private static void FillRoundedRectangle(Graphics graphics, Brush brush, Rectangle rectangle, int radius)
+        {
+            if (rectangle.Width <= 0 || rectangle.Height <= 0)
             {
-                m.Result = new IntPtr(HTTRANSPARENT);
                 return;
             }
 
-            base.WndProc(ref m);
+            if (radius <= 1)
+            {
+                graphics.FillRectangle(brush, rectangle);
+                return;
+            }
+
+            using var path = new System.Drawing.Drawing2D.GraphicsPath();
+            var diameter = radius * 2;
+            path.AddArc(rectangle.Left, rectangle.Top, diameter, diameter, 180, 90);
+            path.AddArc(rectangle.Right - diameter, rectangle.Top, diameter, diameter, 270, 90);
+            path.AddArc(rectangle.Right - diameter, rectangle.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(rectangle.Left, rectangle.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            graphics.FillPath(brush, path);
         }
     }
 
