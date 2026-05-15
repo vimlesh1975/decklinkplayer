@@ -9226,6 +9226,7 @@ internal sealed class MainForm : Form
             var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration, playLoop, videoFilter, audioFilter, transitionSegment);
             var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
             request = _deckLink.ApplyModeDefaults(request, selectedMode);
+            var holdDeckLinkVideoForPlaylistAdvance = ShouldHoldDeckLinkVideoForPlaylistAdvance(previewOnly);
             var commandText = _sdkPlayer.FormatDecoderCommand(
                 request,
                 throttleAudioRealtime: previewOnly,
@@ -9310,7 +9311,8 @@ internal sealed class MainForm : Form
                         previewFrame: UpdateAppPreviewFrame,
                         previewFrameInterval: 1,
                         audioMeter: UpdateAudioMeters,
-                        monitorPcAudio: pcAudio),
+                        monitorPcAudio: pcAudio,
+                        holdVideoOutputOnNaturalEnd: holdDeckLinkVideoForPlaylistAdvance),
                 _playbackCancellation.Token);
 
             AppendLog(result.Cancelled
@@ -9403,6 +9405,31 @@ internal sealed class MainForm : Form
 
         _playbackPauseController.PreserveVideoOutputOnStop = true;
         AppendLog("Holding last DeckLink frame until replacement playout starts...");
+    }
+
+    private bool ShouldHoldDeckLinkVideoForPlaylistAdvance(bool previewOnly)
+    {
+        if (previewOnly || !_playlistPlaybackActive || !_playlistPlayingIndex.HasValue)
+        {
+            return false;
+        }
+
+        var index = _playlistPlayingIndex.Value;
+        if (index < 0 || index >= _playlistItems.Count)
+        {
+            return false;
+        }
+
+        var currentItem = _playlistItems[index];
+        if (!currentItem.IsEndMarker &&
+            currentItem.LoopEnabled &&
+            currentItem.PlayEnabled &&
+            File.Exists(currentItem.FullPath))
+        {
+            return true;
+        }
+
+        return FindNextRepeatingPlaylistIndex(index, out _).HasValue;
     }
 
     private async Task TogglePauseResumePlaybackAsync()
