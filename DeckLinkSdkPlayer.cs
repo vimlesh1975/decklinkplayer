@@ -57,7 +57,8 @@ internal sealed class DeckLinkSdkPlayer
         Action<byte[], int, int>? previewFrame = null,
         int previewFrameInterval = 5,
         Action<double, double>? audioMeter = null,
-        bool monitorPcAudio = false)
+        bool monitorPcAudio = false,
+        bool holdVideoOutputOnNaturalEnd = false)
     {
         var mode = ResolveDisplayMode(request);
         var acquiredOutput = AcquireDeckLinkOutput(request.Device, mode.DisplayMode, logLine);
@@ -115,6 +116,7 @@ internal sealed class DeckLinkSdkPlayer
         var audioOutputEnabled = false;
 
         var killedByCancellation = false;
+        var completedSuccessfully = false;
         using var cancellationRegistration = cancellationToken.Register(() =>
         {
             killedByCancellation = true;
@@ -274,7 +276,9 @@ internal sealed class DeckLinkSdkPlayer
             await IgnoreCancellationAsync(audioPumpTask);
             await IgnoreCancellationAsync(pcAudioMonitorStderrTask);
 
-            return new ProcessResult(videoDecoder.ExitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
+            var exitCode = videoDecoder.ExitCode;
+            completedSuccessfully = !killedByCancellation && exitCode == 0;
+            return new ProcessResult(exitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
         }
         finally
         {
@@ -314,9 +318,9 @@ internal sealed class DeckLinkSdkPlayer
             }
 
             var shouldHoldVideoOutput =
-                killedByCancellation &&
                 videoOutputEnabled &&
-                pauseController?.PreserveVideoOutputOnStop == true;
+                ((killedByCancellation && pauseController?.PreserveVideoOutputOnStop == true) ||
+                    (holdVideoOutputOnNaturalEnd && completedSuccessfully));
 
             if (shouldHoldVideoOutput)
             {
