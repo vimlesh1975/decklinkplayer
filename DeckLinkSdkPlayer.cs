@@ -579,6 +579,30 @@ internal sealed class DeckLinkSdkPlayer
         return (deckLink, (IDeckLinkOutput_v14_2_1)deckLink, false);
     }
 
+    internal static bool TryTakeHeldDeckLinkOutput(
+        string requestedDevice,
+        _BMDDisplayMode displayMode,
+        out IDeckLink? deckLink,
+        out IDeckLinkOutput_v14_2_1? output)
+    {
+        lock (HeldVideoOutputGate)
+        {
+            if (s_heldVideoOutput is not null &&
+                string.Equals(s_heldVideoOutput.Device, requestedDevice, StringComparison.OrdinalIgnoreCase) &&
+                s_heldVideoOutput.DisplayMode == displayMode)
+            {
+                deckLink = s_heldVideoOutput.DeckLink;
+                output = s_heldVideoOutput.Output;
+                s_heldVideoOutput = null;
+                return true;
+            }
+        }
+
+        deckLink = null;
+        output = null;
+        return false;
+    }
+
     internal static void HoldVideoOutput(
         string requestedDevice,
         _BMDDisplayMode displayMode,

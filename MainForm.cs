@@ -265,6 +265,7 @@ internal sealed class MainForm : Form
     private string? _scrubPreviewPath;
     private string? _scrubPreviewModeCode;
     private string? _scrubPreviewHelperDisabledPath;
+    private string? _scrubPreviewOutputDisabledPath;
     private string _mediaRootPath = DefaultMediaRootPath;
     private string? _selectedMediaFolderPath;
     private int? _playlistPlayingIndex;
@@ -291,6 +292,7 @@ internal sealed class MainForm : Form
     private bool _playbackDurationUnavailable;
     private bool _playbackIsStillImage;
     private bool _playbackIsTestPattern;
+    private bool _previewOnlyUserSet;
     private bool _darkMode = true;
     private double _selectedPlaybackSpeed = 1d;
     private double _reversePlaybackSpeed;
@@ -464,7 +466,8 @@ internal sealed class MainForm : Form
             SelectComboValue(_linkBox, GetSetting(settings, "Link"));
             SelectComboValue(_levelABox, GetSetting(settings, "LevelA"));
 
-            if (TryGetBoolSetting(settings, "PreviewOnly", out var previewOnly))
+            _previewOnlyUserSet = TryGetBoolSetting(settings, "PreviewOnlyUserSet", out var previewOnlyUserSet) && previewOnlyUserSet;
+            if (_previewOnlyUserSet && TryGetBoolSetting(settings, "PreviewOnly", out var previewOnly))
             {
                 _previewOnlyCheckBox.Checked = previewOnly;
             }
@@ -521,6 +524,7 @@ internal sealed class MainForm : Form
                     $"Link={_linkBox.SelectedItem?.ToString() ?? string.Empty}",
                     $"LevelA={_levelABox.SelectedItem?.ToString() ?? string.Empty}",
                     $"PreviewOnly={_previewOnlyCheckBox.Checked.ToString(CultureInfo.InvariantCulture)}",
+                    $"PreviewOnlyUserSet={_previewOnlyUserSet.ToString(CultureInfo.InvariantCulture)}",
                     $"PcAudio={_pcAudioCheckBox.Checked.ToString(CultureInfo.InvariantCulture)}",
                 ]);
         }
@@ -1667,6 +1671,11 @@ internal sealed class MainForm : Form
         _previewOnlyCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
         _previewOnlyCheckBox.CheckedChanged += (_, _) =>
         {
+            if (!_loadingSettings)
+            {
+                _previewOnlyUserSet = true;
+            }
+
             SetStatus(PreviewOnlyMode ? "Preview only" : "Ready", PreviewOnlyMode
                 ? Color.FromArgb(232, 181, 105)
                 : Color.FromArgb(130, 210, 164));
@@ -5171,7 +5180,7 @@ internal sealed class MainForm : Form
         ClearPlaylistTransitionLeadIn();
         if (_isPlaying)
         {
-            StopPlayback();
+            StopPlayback(resetPlaybackSpeed: false);
         }
         else
         {
@@ -5484,7 +5493,7 @@ internal sealed class MainForm : Form
         {
             var stoppedTask = _playbackStoppedSignal?.Task;
             PreserveVideoOutputForReplacement();
-            StopPlayback();
+            StopPlayback(resetPlaybackSpeed: false);
             if (stoppedTask is not null)
             {
                 await stoppedTask;
@@ -7543,7 +7552,7 @@ internal sealed class MainForm : Form
                 PreserveVideoOutputForReplacement();
             }
 
-            StopPlayback();
+            StopPlayback(resetPlaybackSpeed: false);
             if (stoppedTask is not null)
             {
                 await stoppedTask;
@@ -7627,7 +7636,8 @@ internal sealed class MainForm : Form
         var size = ParseVideoSize(request.VideoSize)
             ?? throw new InvalidOperationException("Choose a valid DeckLink output size before scrubbing.");
 
-        if (!PreviewOnlyMode)
+        if (!PreviewOnlyMode &&
+            !string.Equals(_scrubPreviewOutputDisabledPath, request.InputPath, StringComparison.OrdinalIgnoreCase))
         {
             EnsureScrubPreviewOutput(request);
         }
@@ -7704,7 +7714,17 @@ internal sealed class MainForm : Form
 
         if (!PreviewOnlyMode)
         {
-            _scrubPreviewOutput!.DisplayFrame(frame);
+            try
+            {
+                _scrubPreviewOutput?.DisplayFrame(frame);
+            }
+            catch (Exception ex)
+            {
+                _scrubPreviewOutputDisabledPath = _scrubPreviewPath;
+                _scrubPreviewOutput?.Dispose();
+                _scrubPreviewOutput = null;
+                AppendLog($"DeckLink scrub preview output disabled: {ex.Message}");
+            }
         }
 
         UpdateAppPreviewFrame(frame, width, height);
@@ -7873,6 +7893,11 @@ internal sealed class MainForm : Form
 
     private void EnsureScrubPreviewOutput(PlayRequest request)
     {
+        if (string.Equals(_scrubPreviewOutputDisabledPath, request.InputPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         var modeCode = request.FormatCode ?? string.Empty;
         if (_scrubPreviewOutput is not null &&
             string.Equals(_scrubPreviewPath, request.InputPath, StringComparison.OrdinalIgnoreCase) &&
@@ -7882,9 +7907,21 @@ internal sealed class MainForm : Form
         }
 
         _scrubPreviewOutput?.Dispose();
-        _scrubPreviewOutput = new NativeDeckLinkPreviewOutput(request);
-        _scrubPreviewPath = request.InputPath;
-        _scrubPreviewModeCode = modeCode;
+        try
+        {
+            _scrubPreviewOutput = new NativeDeckLinkPreviewOutput(request);
+            _scrubPreviewPath = request.InputPath;
+            _scrubPreviewModeCode = modeCode;
+            _scrubPreviewOutputDisabledPath = null;
+        }
+        catch (Exception ex)
+        {
+            _scrubPreviewOutput = null;
+            _scrubPreviewPath = null;
+            _scrubPreviewModeCode = null;
+            _scrubPreviewOutputDisabledPath = request.InputPath;
+            AppendLog($"DeckLink scrub preview output unavailable: {ex.Message}");
+        }
     }
 
     private void UpdateScrubPreviewClock(PlayRequest request, TimeSpan target)
@@ -8509,6 +8546,7 @@ internal sealed class MainForm : Form
         DisposeScrubPreviewHelper();
         _scrubPreviewPath = null;
         _scrubPreviewModeCode = null;
+        _scrubPreviewOutputDisabledPath = null;
         _scrubPreviewMode = false;
         _scrubPreviewLoopRunning = false;
         _scrubPreviewReturnPaused = false;
@@ -9177,7 +9215,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (IsDeckLinkUnavailableException(ex))
         {
-            ApplyDeckLinkUnavailableFallback($"DeckLink modes unavailable. Preview-only mode is available. {FirstLine(ex.Message)}");
+            ApplyDeckLinkUnavailableFallback($"DeckLink modes unavailable. Preview-only mode is available. {FirstLine(ex.Message)}", clearDeckLinkSelection: false);
         }
         catch (Exception ex)
         {
@@ -9208,19 +9246,17 @@ internal sealed class MainForm : Form
             : Color.FromArgb(130, 210, 164);
     }
 
-    private void ApplyDeckLinkUnavailableFallback(string message)
+    private void ApplyDeckLinkUnavailableFallback(string message, bool clearDeckLinkSelection = true)
     {
-        _deviceBox.Items.Clear();
-        _modeBox.Items.Clear();
-        ApplyDefaultPreviewModeValues();
-
-        if (!_previewOnlyCheckBox.Checked)
+        if (clearDeckLinkSelection)
         {
-            _previewOnlyCheckBox.Checked = true;
+            _deviceBox.Items.Clear();
+            _modeBox.Items.Clear();
+            ApplyDefaultPreviewModeValues();
         }
 
         AppendLog(message);
-        SetStatus("Preview only (no DeckLink)", Color.FromArgb(232, 181, 105));
+        SetStatus(clearDeckLinkSelection ? "No DeckLink detected" : "DeckLink unavailable", Color.FromArgb(232, 181, 105));
     }
 
     private void ApplyDefaultPreviewModeValues()
@@ -9399,7 +9435,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (!PreviewOnlyMode && IsDeckLinkUnavailableException(ex))
         {
-            ApplyDeckLinkUnavailableFallback($"DeckLink output unavailable. Preview-only mode is available. {FirstLine(ex.Message)}");
+            ApplyDeckLinkUnavailableFallback($"DeckLink output unavailable. Preview-only mode is available. {FirstLine(ex.Message)}", clearDeckLinkSelection: false);
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
         }
         catch (Exception ex)
@@ -9426,13 +9462,17 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void StopPlayback()
+    private void StopPlayback(bool resetPlaybackSpeed = true)
     {
         if (!_switchingPlayback)
         {
-            StopReversePlaybackSpeed();
-            _selectedPlaybackSpeed = 1d;
-            UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
+            if (resetPlaybackSpeed)
+            {
+                StopReversePlaybackSpeed();
+                _selectedPlaybackSpeed = 1d;
+                UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
+            }
+
             _playlistPlaybackActive = false;
             UpdatePlaylistButtons();
         }
@@ -9608,6 +9648,14 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (_scrubPreviewMode)
+        {
+            _scrubPreviewReturnPaused = false;
+            await FinishScrubPreviewAsync(_selectedStartOffset);
+            SetStatus($"Speed {FormatPlaybackSpeedButtonText(speed)}", Color.FromArgb(126, 188, 226));
+            return;
+        }
+
         if (_playbackPauseController is not null)
         {
             _playbackPauseController.PlaybackSpeed = speed;
@@ -9649,13 +9697,10 @@ internal sealed class MainForm : Form
         }
 
         _reversePlaybackSpeed = speed;
-        if (!_isPlaying)
+        var target = GetCurrentSeekPosition();
+        if (!_scrubPreviewMode)
         {
-            await StartPlaybackAsync(dryRun: false, startOffset: GetCurrentSeekPosition(), startPaused: true);
-        }
-        else if (!_isPaused)
-        {
-            PausePlayback();
+            await BeginScrubPreviewAsync(target);
         }
 
         _reversePlaybackSpeedTimer.Start();
@@ -9687,7 +9732,14 @@ internal sealed class MainForm : Form
         _reverseSpeedSeekRunning = true;
         try
         {
-            await SeekToOffsetAsync(target);
+            if (!_scrubPreviewMode)
+            {
+                await BeginScrubPreviewAsync(target);
+            }
+            else
+            {
+                await QueueScrubPreviewFrameAsync(target);
+            }
         }
         finally
         {
