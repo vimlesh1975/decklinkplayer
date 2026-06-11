@@ -173,7 +173,8 @@ internal sealed class DeckLinkSdkPlayer
             var frameNumber = 0L;
             var stopwatch = Stopwatch.StartNew();
             var frameTicks = Stopwatch.Frequency * frameDuration / timeScale;
-            var pausedTicks = 0L;
+            var nextFrameDueTicks = stopwatch.ElapsedTicks;
+            var sourceFrameCarry = 0d;
             var renderedInitialPausedFrame = false;
 
             while (!cancellationToken.IsCancellationRequested)
@@ -188,10 +189,23 @@ internal sealed class DeckLinkSdkPlayer
                 {
                     var pauseStartedTicks = stopwatch.ElapsedTicks;
                     await pauseController.WaitIfPausedAsync(cancellationToken);
-                    pausedTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
+                    nextFrameDueTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
                 }
 
-                if (!await ReadExactFrameAsync(videoDecoder.StandardOutput.BaseStream, frameBuffer, cancellationToken))
+                var speed = GetForwardPlaybackSpeed(pauseController);
+                var framesToRead = GetSourceFrameReadCount(speed, ref sourceFrameCarry);
+                var readAnyFrame = false;
+                for (var sourceFrame = 0; sourceFrame < framesToRead; sourceFrame++)
+                {
+                    if (!await ReadExactFrameAsync(videoDecoder.StandardOutput.BaseStream, frameBuffer, cancellationToken))
+                    {
+                        break;
+                    }
+
+                    readAnyFrame = true;
+                }
+
+                if (!readAnyFrame)
                 {
                     break;
                 }
@@ -239,8 +253,14 @@ internal sealed class DeckLinkSdkPlayer
                     logLine?.Invoke($"sdk_frame={frameNumber}");
                 }
 
-                var targetTicks = frameNumber * frameTicks;
-                var remainingTicks = targetTicks - (stopwatch.ElapsedTicks - pausedTicks);
+                nextFrameDueTicks += frameTicks;
+                var remainingTicks = nextFrameDueTicks - stopwatch.ElapsedTicks;
+                if (remainingTicks < -Stopwatch.Frequency)
+                {
+                    nextFrameDueTicks = stopwatch.ElapsedTicks;
+                    remainingTicks = 0;
+                }
+
                 if (remainingTicks > 0)
                 {
                     var delayMs = (int)Math.Min(remainingTicks * 1000 / Stopwatch.Frequency, 100);
@@ -416,7 +436,8 @@ internal sealed class DeckLinkSdkPlayer
             var frameNumber = 0L;
             var stopwatch = Stopwatch.StartNew();
             var frameTicks = GetFrameTicks(request.FrameRate);
-            var pausedTicks = 0L;
+            var nextFrameDueTicks = stopwatch.ElapsedTicks;
+            var sourceFrameCarry = 0d;
             var renderedInitialPausedFrame = false;
 
             while (!cancellationToken.IsCancellationRequested)
@@ -431,10 +452,23 @@ internal sealed class DeckLinkSdkPlayer
                 {
                     var pauseStartedTicks = stopwatch.ElapsedTicks;
                     await pauseController.WaitIfPausedAsync(cancellationToken);
-                    pausedTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
+                    nextFrameDueTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
                 }
 
-                if (!await ReadExactFrameAsync(videoDecoder.StandardOutput.BaseStream, frameBuffer, cancellationToken))
+                var speed = GetForwardPlaybackSpeed(pauseController);
+                var framesToRead = GetSourceFrameReadCount(speed, ref sourceFrameCarry);
+                var readAnyFrame = false;
+                for (var sourceFrame = 0; sourceFrame < framesToRead; sourceFrame++)
+                {
+                    if (!await ReadExactFrameAsync(videoDecoder.StandardOutput.BaseStream, frameBuffer, cancellationToken))
+                    {
+                        break;
+                    }
+
+                    readAnyFrame = true;
+                }
+
+                if (!readAnyFrame)
                 {
                     break;
                 }
@@ -452,8 +486,14 @@ internal sealed class DeckLinkSdkPlayer
                     logLine?.Invoke($"preview_frame={frameNumber}");
                 }
 
-                var targetTicks = frameNumber * frameTicks;
-                var remainingTicks = targetTicks - (stopwatch.ElapsedTicks - pausedTicks);
+                nextFrameDueTicks += frameTicks;
+                var remainingTicks = nextFrameDueTicks - stopwatch.ElapsedTicks;
+                if (remainingTicks < -Stopwatch.Frequency)
+                {
+                    nextFrameDueTicks = stopwatch.ElapsedTicks;
+                    remainingTicks = 0;
+                }
+
                 if (remainingTicks > 0)
                 {
                     var delayMs = (int)Math.Min(remainingTicks * 1000 / Stopwatch.Frequency, 100);
@@ -1073,6 +1113,22 @@ internal sealed class DeckLinkSdkPlayer
         return true;
     }
 
+    private static double GetForwardPlaybackSpeed(PlaybackPauseController? pauseController)
+    {
+        var speed = pauseController?.PlaybackSpeed ?? 1d;
+        return speed > 1d && !double.IsNaN(speed) && !double.IsInfinity(speed)
+            ? speed
+            : 1d;
+    }
+
+    private static int GetSourceFrameReadCount(double speed, ref double sourceFrameCarry)
+    {
+        sourceFrameCarry += speed;
+        var framesToRead = Math.Max(1, (int)Math.Floor(sourceFrameCarry));
+        sourceFrameCarry -= framesToRead;
+        return framesToRead;
+    }
+
     private static void AddSeekArguments(List<string> args, TimeSpan startOffset)
     {
         if (startOffset <= TimeSpan.Zero)
@@ -1133,11 +1189,13 @@ internal sealed class DeckLinkSdkPlayer
         var bytesPerSampleFrame = checked(channels * AudioBytesPerSample);
         var bufferBytes = checked(AudioChunkSampleFrames * bytesPerSampleFrame);
         var managedBuffer = new byte[bufferBytes];
+        var sourceSpeedBuffer = managedBuffer;
         var unmanagedBuffer = Marshal.AllocHGlobal(bufferBytes);
         var totalWritten = 0L;
         var meterPeakLeft = 0L;
         var meterPeakRight = 0L;
         var meterSampleFrames = 0;
+        var sourceSampleFrameCarry = 0d;
 
         try
         {
@@ -1148,11 +1206,19 @@ internal sealed class DeckLinkSdkPlayer
                     await pauseController.WaitIfPausedAsync(cancellationToken);
                 }
 
-                var bytesRead = await ReadAlignedAudioBlockAsync(
+                var speed = GetForwardPlaybackSpeed(pauseController);
+                var speedRead = await ReadSpeedAdjustedAudioBlockAsync(
                     audioDecoder.StandardOutput.BaseStream,
                     managedBuffer,
+                    sourceSpeedBuffer,
+                    AudioChunkSampleFrames,
                     bytesPerSampleFrame,
+                    speed,
+                    sourceSampleFrameCarry,
                     cancellationToken);
+                sourceSpeedBuffer = speedRead.SourceBuffer;
+                sourceSampleFrameCarry = speedRead.SourceSampleFrameCarry;
+                var bytesRead = speedRead.BytesRead;
 
                 if (bytesRead <= 0)
                 {
@@ -1378,6 +1444,71 @@ internal sealed class DeckLinkSdkPlayer
 
         return bytesRead - bytesRead % bytesPerSampleFrame;
     }
+
+    private static async Task<AudioSpeedReadResult> ReadSpeedAdjustedAudioBlockAsync(
+        Stream stream,
+        byte[] outputBuffer,
+        byte[] sourceBuffer,
+        int outputSampleFrameCapacity,
+        int bytesPerSampleFrame,
+        double speed,
+        double sourceSampleFrameCarry,
+        CancellationToken cancellationToken)
+    {
+        if (speed <= 1.001d)
+        {
+            var bytesRead = await ReadAlignedAudioBlockAsync(stream, outputBuffer, bytesPerSampleFrame, cancellationToken);
+            return new AudioSpeedReadResult(bytesRead, sourceBuffer, 0d);
+        }
+
+        sourceSampleFrameCarry += outputSampleFrameCapacity * speed;
+        var requestedSourceFrames = Math.Max(outputSampleFrameCapacity, (int)Math.Floor(sourceSampleFrameCarry));
+        sourceSampleFrameCarry -= requestedSourceFrames;
+
+        var requestedSourceBytes = checked(requestedSourceFrames * bytesPerSampleFrame);
+        if (sourceBuffer.Length != requestedSourceBytes)
+        {
+            sourceBuffer = new byte[requestedSourceBytes];
+        }
+
+        var sourceBytesRead = await ReadAlignedAudioBlockAsync(
+            stream,
+            sourceBuffer,
+            bytesPerSampleFrame,
+            cancellationToken);
+        if (sourceBytesRead <= 0)
+        {
+            return new AudioSpeedReadResult(0, sourceBuffer, sourceSampleFrameCarry);
+        }
+
+        var sourceSampleFrames = sourceBytesRead / bytesPerSampleFrame;
+        var outputSampleFrames = Math.Min(
+            outputSampleFrameCapacity,
+            Math.Max(1, (int)Math.Ceiling(sourceSampleFrames / speed)));
+
+        for (var outputFrame = 0; outputFrame < outputSampleFrames; outputFrame++)
+        {
+            var sourceFrame = Math.Min(
+                sourceSampleFrames - 1,
+                (int)Math.Floor(outputFrame * sourceSampleFrames / (double)outputSampleFrames));
+            Buffer.BlockCopy(
+                sourceBuffer,
+                sourceFrame * bytesPerSampleFrame,
+                outputBuffer,
+                outputFrame * bytesPerSampleFrame,
+                bytesPerSampleFrame);
+        }
+
+        return new AudioSpeedReadResult(
+            outputSampleFrames * bytesPerSampleFrame,
+            sourceBuffer,
+            sourceSampleFrameCarry);
+    }
+
+    private readonly record struct AudioSpeedReadResult(
+        int BytesRead,
+        byte[] SourceBuffer,
+        double SourceSampleFrameCarry);
 
     private static async Task IgnoreCancellationAsync(Task? task)
     {

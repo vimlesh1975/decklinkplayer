@@ -5,6 +5,7 @@ internal sealed class PlaybackPauseController
     private readonly object _gate = new();
     private TaskCompletionSource? _resumeSignal;
     private bool _preserveVideoOutputOnStop;
+    private double _playbackSpeed = 1d;
 
     public event Action<bool>? PauseStateChanged;
 
@@ -33,6 +34,26 @@ internal sealed class PlaybackPauseController
             lock (_gate)
             {
                 return _resumeSignal is not null;
+            }
+        }
+    }
+
+    public double PlaybackSpeed
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _playbackSpeed;
+            }
+        }
+        set
+        {
+            lock (_gate)
+            {
+                _playbackSpeed = value > 0d && !double.IsNaN(value) && !double.IsInfinity(value)
+                    ? value
+                    : 1d;
             }
         }
     }

@@ -40,7 +40,7 @@ internal sealed class MainForm : Form
     private const int PreferredClientHeight = 1080;
     private const int RootPadding = 16;
     private const int HeaderRowHeight = 64;
-    private const int ActionRowHeight = 166;
+    private const int ActionRowHeight = 198;
     private const int RemainingTimeRowHeight = 32;
     private const int CurrentTimeRowHeight = 32;
     private const int ToggleRowHeight = 44;
@@ -68,6 +68,7 @@ internal sealed class MainForm : Form
     private const bool EnableInProcessNativeSeekPreview = false;
     private static readonly TimeSpan DefaultStillDuration = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DefaultTransitionDuration = TimeSpan.FromSeconds(1);
+    private static readonly double[] PlaybackSpeedOptions = [-20d, -10d, -5d, -2d, -1.5d, -1d, 0d, 1d, 1.5d, 2d, 5d, 10d, 20d];
     private static readonly string[] PlaylistTransitionOptions =
     [
         PlaylistTransitionCut,
@@ -189,13 +190,11 @@ internal sealed class MainForm : Form
     private readonly TextBox _markOutValueBox = new();
     private readonly Button _goToInButton = new();
     private readonly Button _playFromInButton = new();
-    private readonly Button _playInToOutButton = new();
     private readonly Button _goToTcButton = new();
     private readonly TextBox _goToTcBox = new();
     private readonly Button _goToOutButton = new();
     private readonly NumericUpDown _lastSecondsBox = new();
     private readonly Button _playLastSecondsButton = new();
-    private readonly Button _addTrimmedToPlaylistButton = new();
     private readonly TextBox _logBox = new();
     private readonly PictureBox _appPreviewBox = new();
     private readonly AudioMeterBar _leftAudioMeter = new();
@@ -208,12 +207,14 @@ internal sealed class MainForm : Form
     private readonly Label _positionStartLabel = new();
     private readonly Label _positionEndLabel = new();
     private readonly SeekBarControl _positionBar = new();
+    private readonly List<Button> _playbackSpeedButtons = new();
     private readonly List<Process> _externalFfplayProcesses = new();
     private readonly object _externalFfplayLock = new();
     private readonly System.Windows.Forms.Timer _mediaSearchTimer = new() { Interval = 350 };
     private readonly System.Windows.Forms.Timer _durationProbeTimer = new() { Interval = 350 };
     private readonly System.Windows.Forms.Timer _playbackPositionTimer = new() { Interval = 500 };
     private readonly System.Windows.Forms.Timer _scrubSeekTimer = new() { Interval = 140 };
+    private readonly System.Windows.Forms.Timer _reversePlaybackSpeedTimer = new() { Interval = 120 };
     private readonly System.Windows.Forms.Timer _cpuUsageTimer = new() { Interval = 1000 };
 
     private TableLayoutPanel? _settingsSplit;
@@ -244,6 +245,8 @@ internal sealed class MainForm : Form
     private TimeSpan? _playbackDuration;
     private DateTime? _playbackStartedAt;
     private DateTime? _playbackPausedAt;
+    private DateTime? _playbackClockSampleAt;
+    private TimeSpan _playbackClockElapsed;
     private TimeSpan _playbackPausedDuration;
     private TimeSpan _selectedStartOffset;
     private TimeSpan _playbackStartOffset;
@@ -289,7 +292,10 @@ internal sealed class MainForm : Form
     private bool _playbackIsStillImage;
     private bool _playbackIsTestPattern;
     private bool _darkMode = true;
+    private double _selectedPlaybackSpeed = 1d;
+    private double _reversePlaybackSpeed;
     private int _appPreviewFramePending;
+    private bool _reverseSpeedSeekRunning;
     private ulong _lastSystemIdleTime;
     private ulong _lastSystemKernelTime;
     private ulong _lastSystemUserTime;
@@ -335,6 +341,7 @@ internal sealed class MainForm : Form
         _durationProbeTimer.Tick += DurationProbeTimer_Tick;
         _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
+        _reversePlaybackSpeedTimer.Tick += async (_, _) => await ReversePlaybackSpeedTimer_TickAsync();
         KeyDown += MainForm_KeyDown;
         InitializeCpuUsageSampling();
         _cpuUsageTimer.Tick += (_, _) => UpdateCpuUsageLabel();
@@ -713,13 +720,16 @@ internal sealed class MainForm : Form
         SetButtonToolTip(_nextCueButton, "Cue the next playable playlist row.");
         SetButtonToolTip(_markInButton, "Mark trim IN at the current position.");
         SetButtonToolTip(_markOutButton, "Mark trim OUT at the current position.");
-        SetButtonToolTip(_addTrimmedToPlaylistButton, "Add the marked IN to OUT range to the playlist.");
         SetButtonToolTip(_goToInButton, "Seek to the marked IN point.");
         SetButtonToolTip(_playFromInButton, "Play from the marked IN point.");
-        SetButtonToolTip(_playInToOutButton, "Play only the marked IN to OUT range.");
         SetButtonToolTip(_goToTcButton, "Seek to the typed timecode.");
         SetButtonToolTip(_playLastSecondsButton, "Play the last selected number of seconds before OUT.");
         SetButtonToolTip(_goToOutButton, "Seek to the marked OUT point.");
+        foreach (var button in _playbackSpeedButtons)
+        {
+            SetButtonToolTip(button, "Set playback shuttle speed.");
+        }
+
         SetButtonToolTip(_toggleSettingsButton, "Show or hide DeckLink output settings.");
         SetButtonToolTip(_toggleLogButton, "Show or hide the playback log.");
 
@@ -1580,12 +1590,10 @@ internal sealed class MainForm : Form
         ConfigureTrimButton(_nextCueButton, "Next Cue", 86, Color.FromArgb(52, 67, 82), () => CueRelativePlaylistItem(1));
         ConfigureTrimButton(_markInButton, "IN", 38, Color.FromArgb(52, 67, 82), MarkTrimIn);
         ConfigureTrimButton(_markOutButton, "Out", 44, Color.FromArgb(52, 67, 82), MarkTrimOut);
-        ConfigureTrimButton(_addTrimmedToPlaylistButton, "Add Trimmed", 118, Color.FromArgb(39, 125, 87), AddTrimmedClipToPlaylist);
         ConfigureSeekTextBox(_markInValueBox, 68, readOnly: true);
         ConfigureSeekTextBox(_markOutValueBox, 68, readOnly: true);
         ConfigureSeekCommandButton(_goToInButton, "Go to IN", 70, GoToInAsync);
         ConfigureSeekCommandButton(_playFromInButton, "Play from IN", 98, PlayFromInAsync);
-        ConfigureSeekCommandButton(_playInToOutButton, "Play IN to OUT", 108, PlayInToOutAsync);
         ConfigureSeekCommandButton(_goToTcButton, "GoTo TC", 72, GoToTimecodeAsync);
         ConfigureSeekTextBox(_goToTcBox, 108, readOnly: false);
         _goToTcBox.Text = "00:00:00:00";
@@ -1708,6 +1716,47 @@ internal sealed class MainForm : Form
         return panel;
     }
 
+    private Control[] BuildPlaybackSpeedButtons()
+    {
+        if (_playbackSpeedButtons.Count == 0)
+        {
+            foreach (var speed in PlaybackSpeedOptions)
+            {
+                _playbackSpeedButtons.Add(CreatePlaybackSpeedButton(speed));
+            }
+        }
+
+        return _playbackSpeedButtons.Cast<Control>().ToArray();
+    }
+
+    private Button CreatePlaybackSpeedButton(double speed)
+    {
+        var button = new Button
+        {
+            Text = FormatPlaybackSpeedButtonText(speed),
+            Tag = speed,
+            Width = Math.Abs(speed) >= 10d ? 56 : Math.Abs(speed) == 1.5d ? 58 : 48,
+            Height = 31,
+            Margin = new Padding(0, 0, 5, 0),
+            TextAlign = ContentAlignment.MiddleCenter,
+            UseVisualStyleBackColor = false,
+            Enabled = false,
+        };
+        StyleButton(button, Color.FromArgb(52, 67, 82));
+        button.Click += async (_, _) => await SetPlaybackSpeedAsync(speed);
+        return button;
+    }
+
+    private static string FormatPlaybackSpeedButtonText(double speed)
+    {
+        return speed switch
+        {
+            0d => "0",
+            > 0d => $"+{speed.ToString("0.##", CultureInfo.InvariantCulture)}x",
+            _ => $"{speed.ToString("0.##", CultureInfo.InvariantCulture)}x",
+        };
+    }
+
     private Control BuildSeekActionGroup(
         int width,
         Control[] negativeControls,
@@ -1721,7 +1770,7 @@ internal sealed class MainForm : Form
         var panel = new Panel
         {
             Width = width,
-            Height = 152,
+            Height = 184,
             Margin = new Padding(0),
             BackColor = Color.FromArgb(30, 35, 40),
             Padding = new Padding(8, 3, 8, 5),
@@ -1732,9 +1781,14 @@ internal sealed class MainForm : Form
         seekPanel.Size = new Size(width - 16, 35);
         seekPanel.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
 
+        var speedControls = BuildPlaybackSpeedButtons();
+        var speedWidth = MeasureControlsWidth(speedControls);
+        var speedPanel = BuildSeekButtonPanel(speedControls, speedWidth);
+        speedPanel.Location = new Point(Math.Max(0, (width - 16 - speedWidth) / 2), 42);
+
         var transportRow = new Panel
         {
-            Location = new Point(8, 42),
+            Location = new Point(8, 76),
             Size = new Size(width - 16, 31),
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -1767,16 +1821,14 @@ internal sealed class MainForm : Form
         transportRow.Controls.Add(markOutPanel);
 
         var goToInPanel = BuildSeekButtonPanel([_goToInButton], MeasureControlsWidth([_goToInButton]));
-        goToInPanel.Location = new Point(markInPanel.Left, 78);
+        goToInPanel.Location = new Point(markInPanel.Left, 112);
 
         var goToOutPanel = BuildSeekButtonPanel([_goToOutButton], MeasureControlsWidth([_goToOutButton]));
-        goToOutPanel.Location = new Point(Math.Max(0, markOutPanel.Right - goToOutPanel.Width), 78);
+        goToOutPanel.Location = new Point(Math.Max(0, markOutPanel.Right - goToOutPanel.Width), 112);
 
         var commandControls = new Control[]
         {
             _playFromInButton,
-            _playInToOutButton,
-            _addTrimmedToPlaylistButton,
             _goToTcButton,
             _goToTcBox,
             _lastSecondsBox,
@@ -1791,13 +1843,14 @@ internal sealed class MainForm : Form
         };
         var commandWidth = MeasureControlsWidth(commandControls);
         var commandPanel = BuildSeekButtonPanel(commandControls, commandWidth);
-        commandPanel.Location = new Point(Math.Max(0, (width - 16 - commandWidth) / 2), 78);
+        commandPanel.Location = new Point(Math.Max(0, (width - 16 - commandWidth) / 2), 112);
 
         var playlistCommandWidth = MeasureControlsWidth(playlistCommandControls);
         var playlistCommandPanel = BuildSeekButtonPanel(playlistCommandControls, playlistCommandWidth);
-        playlistCommandPanel.Location = new Point(Math.Max(0, (width - 16 - playlistCommandWidth) / 2), 116);
+        playlistCommandPanel.Location = new Point(Math.Max(0, (width - 16 - playlistCommandWidth) / 2), 148);
 
         panel.Controls.Add(seekPanel);
+        panel.Controls.Add(speedPanel);
         panel.Controls.Add(transportRow);
         panel.Controls.Add(goToInPanel);
         panel.Controls.Add(goToOutPanel);
@@ -2499,16 +2552,22 @@ internal sealed class MainForm : Form
             ReferenceEquals(button, _removePlaylistItemButton) ||
             ReferenceEquals(button, _stopPlaylistButton);
         var isGo = ReferenceEquals(button, _addToPlaylistButton) ||
-            ReferenceEquals(button, _addTrimmedToPlaylistButton) ||
             ReferenceEquals(button, _startPlaylistButton);
         var isPlay = ReferenceEquals(button, _playPlaylistItemButton) ||
             ReferenceEquals(button, _previousPlayButton) ||
             ReferenceEquals(button, _nextPlayButton) ||
             ReferenceEquals(button, _browseMediaRootButton);
         var isPause = ReferenceEquals(button, _pauseResumeButton);
+        var playbackSpeed = button.Tag is double speedValue && PlaybackSpeedOptions.Contains(speedValue)
+            ? speedValue
+            : (double?)null;
+        var isActiveSpeed = playbackSpeed.HasValue && Math.Abs(playbackSpeed.Value - _selectedPlaybackSpeed) < 0.001d;
 
         if (dark)
         {
+            if (isActiveSpeed && playbackSpeed < 0d) return (Color.FromArgb(184, 104, 48), Color.White);
+            if (isActiveSpeed && playbackSpeed == 0d) return (Color.FromArgb(183, 126, 46), Color.White);
+            if (isActiveSpeed) return (Color.FromArgb(39, 125, 87), Color.White);
             if (isDanger) return (Color.FromArgb(149, 64, 58), Color.White);
             if (isGo) return (Color.FromArgb(39, 125, 87), Color.White);
             if (isPlay) return (Color.FromArgb(63, 96, 135), Color.White);
@@ -2516,6 +2575,9 @@ internal sealed class MainForm : Form
             return (Color.FromArgb(52, 67, 82), Color.White);
         }
 
+        if (isActiveSpeed && playbackSpeed < 0d) return (Color.FromArgb(200, 119, 56), Color.White);
+        if (isActiveSpeed && playbackSpeed == 0d) return (Color.FromArgb(205, 143, 47), Color.White);
+        if (isActiveSpeed) return (Color.FromArgb(40, 145, 97), Color.White);
         if (isDanger) return (Color.FromArgb(196, 83, 75), Color.White);
         if (isGo) return (Color.FromArgb(40, 145, 97), Color.White);
         if (isPlay) return (Color.FromArgb(55, 117, 178), Color.White);
@@ -2747,20 +2809,6 @@ internal sealed class MainForm : Form
             Width = 360,
             MinimumWidth = 240,
             AutoSizeMode = DataGridViewAutoSizeColumnMode.None,
-            SortMode = DataGridViewColumnSortMode.NotSortable,
-        });
-        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
-        {
-            Name = "In",
-            HeaderText = "In",
-            Width = 92,
-            SortMode = DataGridViewColumnSortMode.NotSortable,
-        });
-        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
-        {
-            Name = "Out",
-            HeaderText = "Out",
-            Width = 92,
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
         _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -5804,8 +5852,6 @@ internal sealed class MainForm : Form
                 startText,
                 !isEndMarker && item.PlayEnabled,
                 isEndMarker ? PlaylistEndMarkerText : GetMediaDisplayPath(item.FullPath),
-                isEndMarker ? "--" : FormatPlaylistTime(item.TcIn),
-                isEndMarker ? "--" : item.TcOut.HasValue ? FormatPlaylistTime(item.TcOut.Value) : "--",
                 !isEndMarker && duration.HasValue ? FormatPlaylistTime(duration.Value) : "--",
                 !isEndMarker && item.LoopEnabled,
                 isEndMarker ? PlaylistTransitionCut : NormalizePlaylistTransition(item.Transition),
@@ -6112,15 +6158,14 @@ internal sealed class MainForm : Form
 
         _markInButton.Enabled = canMark;
         _markOutButton.Enabled = canMark;
-        _addTrimmedToPlaylistButton.Enabled = hasMedia && durationKnown;
         _goToInButton.Enabled = canSeekCommand;
         _playFromInButton.Enabled = canSeekCommand;
-        _playInToOutButton.Enabled = canSeekCommand;
         _goToTcButton.Enabled = canSeekCommand;
         _goToTcBox.Enabled = canSeekCommand;
         _goToOutButton.Enabled = canSeekCommand;
         _lastSecondsBox.Enabled = canSeekCommand;
         _playLastSecondsButton.Enabled = canSeekCommand;
+        UpdatePlaybackSpeedButtons(hasMedia && !isStill && !_playbackIsTestPattern && durationKnown);
 
         if (TryGetCurrentTrimRange(out _, out var markIn, out var markOut, out _))
         {
@@ -6131,6 +6176,15 @@ internal sealed class MainForm : Form
         {
             _markInValueBox.Text = "--";
             _markOutValueBox.Text = "--";
+        }
+    }
+
+    private void UpdatePlaybackSpeedButtons(bool canUseSpeed)
+    {
+        foreach (var button in _playbackSpeedButtons)
+        {
+            button.Enabled = canUseSpeed || (_isPlaying && !_playbackIsStillImage && !_playbackIsTestPattern);
+            ApplyButtonTheme(button, _darkMode);
         }
     }
 
@@ -7152,6 +7206,8 @@ internal sealed class MainForm : Form
     private void StartPlaybackClock(PlayRequest request, bool startPaused, TimeSpan? sourceDuration = null)
     {
         _playbackStartedAt = DateTime.UtcNow;
+        _playbackClockSampleAt = _playbackStartedAt;
+        _playbackClockElapsed = TimeSpan.Zero;
         _playbackPausedDuration = TimeSpan.Zero;
         _playbackStartOffset = TimeSpan.Zero;
         _playbackEndOffset = null;
@@ -7199,6 +7255,7 @@ internal sealed class MainForm : Form
         _isPaused = startPaused;
         _playbackPausedAt = startPaused ? DateTime.UtcNow : null;
         _pauseResumeButton.Text = startPaused ? "Resume" : "Pause";
+        UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
         if (startPaused)
         {
             _playbackPositionTimer.Stop();
@@ -7220,6 +7277,8 @@ internal sealed class MainForm : Form
         _pauseResumeButton.Text = "Pause";
         _playbackStartedAt = null;
         _playbackPausedAt = null;
+        _playbackClockSampleAt = null;
+        _playbackClockElapsed = TimeSpan.Zero;
         _playbackPausedDuration = TimeSpan.Zero;
         _playbackStartOffset = TimeSpan.Zero;
         _playbackEndOffset = null;
@@ -7299,8 +7358,8 @@ internal sealed class MainForm : Form
 
     private void UpdatePlaybackDurationLabel()
     {
-        var clockNow = _playbackPausedAt ?? DateTime.UtcNow;
-        var elapsedSinceDecoderStart = clockNow - _playbackStartedAt!.Value - _playbackPausedDuration;
+        CapturePlaybackClockProgress();
+        var elapsedSinceDecoderStart = _playbackClockElapsed;
         if (elapsedSinceDecoderStart < TimeSpan.Zero)
         {
             elapsedSinceDecoderStart = TimeSpan.Zero;
@@ -8547,8 +8606,8 @@ internal sealed class MainForm : Form
             return _selectedStartOffset;
         }
 
-        var clockNow = _playbackPausedAt ?? DateTime.UtcNow;
-        var elapsedSinceDecoderStart = clockNow - _playbackStartedAt.Value - _playbackPausedDuration;
+        CapturePlaybackClockProgress();
+        var elapsedSinceDecoderStart = _playbackClockElapsed;
         if (elapsedSinceDecoderStart < TimeSpan.Zero)
         {
             elapsedSinceDecoderStart = TimeSpan.Zero;
@@ -9252,7 +9311,15 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            var pauseController = new PlaybackPauseController();
+            if (_selectedPlaybackSpeed <= 0d)
+            {
+                startPaused = true;
+            }
+
+            var pauseController = new PlaybackPauseController
+            {
+                PlaybackSpeed = _selectedPlaybackSpeed > 0d ? _selectedPlaybackSpeed : 1d,
+            };
             if (startPaused)
             {
                 pauseController.Pause();
@@ -9363,6 +9430,9 @@ internal sealed class MainForm : Form
     {
         if (!_switchingPlayback)
         {
+            StopReversePlaybackSpeed();
+            _selectedPlaybackSpeed = 1d;
+            UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
             _playlistPlaybackActive = false;
             UpdatePlaylistButtons();
         }
@@ -9468,6 +9538,7 @@ internal sealed class MainForm : Form
             return;
         }
 
+        CapturePlaybackClockProgress();
         _playbackPauseController.Pause();
         _isPaused = true;
         _playbackPausedAt = DateTime.UtcNow;
@@ -9493,6 +9564,7 @@ internal sealed class MainForm : Form
 
         _playbackPausedAt = null;
         _isPaused = false;
+        _playbackClockSampleAt = DateTime.UtcNow;
         _playbackPauseController.Resume();
         _playbackPositionTimer.Start();
         _pauseResumeButton.Text = "Pause";
@@ -9500,6 +9572,175 @@ internal sealed class MainForm : Form
         SetStatus("Playing", Color.FromArgb(126, 188, 226));
         UpdateDurationLabel();
         UpdateClipTransportButtons();
+    }
+
+    private async Task SetPlaybackSpeedAsync(double speed)
+    {
+        if (double.IsNaN(speed) || double.IsInfinity(speed))
+        {
+            return;
+        }
+
+        CapturePlaybackClockProgress();
+        _selectedPlaybackSpeed = speed;
+        UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
+
+        if (speed < 0d)
+        {
+            await StartReversePlaybackSpeedAsync(speed);
+            return;
+        }
+
+        StopReversePlaybackSpeed();
+        if (speed == 0d)
+        {
+            if (_playbackPauseController is not null)
+            {
+                _playbackPauseController.PlaybackSpeed = 1d;
+            }
+
+            if (_isPlaying && !_isPaused)
+            {
+                PausePlayback();
+            }
+
+            SetStatus("Speed 0x", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        if (_playbackPauseController is not null)
+        {
+            _playbackPauseController.PlaybackSpeed = speed;
+        }
+
+        if (!_isPlaying)
+        {
+            if (!CanUsePlaybackSpeed())
+            {
+                SetStatus("Choose a video file first", Color.FromArgb(232, 181, 105));
+                return;
+            }
+
+            await StartPlaybackAsync(dryRun: false, startOffset: GetCurrentSeekPosition());
+        }
+        else if (_isPaused)
+        {
+            ResumePlayback();
+        }
+
+        _playbackPositionTimer.Start();
+        SetStatus($"Speed {FormatPlaybackSpeedButtonText(speed)}", Color.FromArgb(126, 188, 226));
+    }
+
+    private async Task StartReversePlaybackSpeedAsync(double speed)
+    {
+        if (_playbackIsStillImage || _playbackIsTestPattern)
+        {
+            SetStatus("Reverse speed is for video files", Color.FromArgb(232, 181, 105));
+            StopReversePlaybackSpeed();
+            return;
+        }
+
+        if (!CanUsePlaybackSpeed() && !_isPlaying)
+        {
+            SetStatus("Choose a video file first", Color.FromArgb(232, 181, 105));
+            StopReversePlaybackSpeed();
+            return;
+        }
+
+        _reversePlaybackSpeed = speed;
+        if (!_isPlaying)
+        {
+            await StartPlaybackAsync(dryRun: false, startOffset: GetCurrentSeekPosition(), startPaused: true);
+        }
+        else if (!_isPaused)
+        {
+            PausePlayback();
+        }
+
+        _reversePlaybackSpeedTimer.Start();
+        SetStatus($"Reverse {Math.Abs(speed).ToString("0.##", CultureInfo.InvariantCulture)}x", Color.FromArgb(232, 181, 105));
+    }
+
+    private async Task ReversePlaybackSpeedTimer_TickAsync()
+    {
+        if (_reverseSpeedSeekRunning || _reversePlaybackSpeed >= 0d)
+        {
+            return;
+        }
+
+        var duration = GetCurrentSeekDuration();
+        if (!duration.HasValue || duration.Value <= TimeSpan.Zero)
+        {
+            StopReversePlaybackSpeed();
+            return;
+        }
+
+        var stepSeconds = Math.Abs(_reversePlaybackSpeed) * _reversePlaybackSpeedTimer.Interval / 1000d;
+        var target = GetCurrentSeekPosition() - TimeSpan.FromSeconds(stepSeconds);
+        var reachedStart = target <= TimeSpan.Zero;
+        if (reachedStart)
+        {
+            target = TimeSpan.Zero;
+        }
+
+        _reverseSpeedSeekRunning = true;
+        try
+        {
+            await SeekToOffsetAsync(target);
+        }
+        finally
+        {
+            _reverseSpeedSeekRunning = false;
+        }
+
+        if (reachedStart)
+        {
+            _selectedPlaybackSpeed = 0d;
+            StopReversePlaybackSpeed();
+            UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
+            SetStatus("Speed 0x", Color.FromArgb(232, 181, 105));
+        }
+    }
+
+    private void StopReversePlaybackSpeed()
+    {
+        _reversePlaybackSpeedTimer.Stop();
+        _reversePlaybackSpeed = 0d;
+    }
+
+    private bool CanUsePlaybackSpeed()
+    {
+        var path = _inputPathBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || IsImageFile(path))
+        {
+            return false;
+        }
+
+        return !_playbackIsTestPattern && (GetCurrentSeekDuration().HasValue || GetKnownMediaDuration(path).HasValue);
+    }
+
+    private void CapturePlaybackClockProgress()
+    {
+        if (!_playbackStartedAt.HasValue)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (!_playbackClockSampleAt.HasValue)
+        {
+            _playbackClockSampleAt = now;
+            return;
+        }
+
+        var elapsed = now - _playbackClockSampleAt.Value;
+        if (elapsed > TimeSpan.Zero && !_isPaused && _selectedPlaybackSpeed > 0d)
+        {
+            _playbackClockElapsed += TimeSpan.FromTicks((long)Math.Round(elapsed.Ticks * _selectedPlaybackSpeed));
+        }
+
+        _playbackClockSampleAt = now;
     }
 
     private PlayRequest BuildRequest(
@@ -9749,6 +9990,7 @@ internal sealed class MainForm : Form
         _mediaGrid.Enabled = true;
         _playlistGrid.Enabled = true;
         UpdatePlaylistButtons();
+        UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
         if (!isPlaying)
         {
             _pauseResumeButton.Text = "Pause";
