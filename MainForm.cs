@@ -200,6 +200,7 @@ internal sealed class MainForm : Form
     private readonly AudioMeterBar _leftAudioMeter = new();
     private readonly AudioMeterBar _rightAudioMeter = new();
     private readonly Label _statusLabel = new();
+    private readonly Label _playbackModeLabel = new();
     private readonly Label _cpuUsageLabel = new();
     private readonly Label _loadedFileLabel = new();
     private readonly Label _durationLabel = new();
@@ -296,6 +297,8 @@ internal sealed class MainForm : Form
     private bool _darkMode = true;
     private double _selectedPlaybackSpeed = 1d;
     private double _reversePlaybackSpeed;
+    private double _reversePlaybackFrameCarry;
+    private DateTime? _reversePlaybackLastTickAt;
     private int _appPreviewFramePending;
     private bool _reverseSpeedSeekRunning;
     private ulong _lastSystemIdleTime;
@@ -738,6 +741,7 @@ internal sealed class MainForm : Form
         SetButtonToolTip(_toggleLogButton, "Show or hide the playback log.");
 
         SetButtonToolTip(_darkModeCheckBox, "Switch between dark and light mode.");
+        SetButtonToolTip(_playbackModeLabel, "Shows whether playback is controlled manually or by the playlist.");
         SetButtonToolTip(_previewOnlyCheckBox, "Play in the preview window without DeckLink output.");
         SetButtonToolTip(_pcAudioCheckBox, "Send preview playback audio to the PC speakers.");
 
@@ -879,7 +883,17 @@ internal sealed class MainForm : Form
         _statusLabel.Size = new Size(820, 18);
         _statusLabel.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
         _statusLabel.ForeColor = Color.FromArgb(130, 210, 164);
-        _statusLabel.Location = new Point(332, 18);
+        _statusLabel.Location = new Point(526, 18);
+
+        _playbackModeLabel.Text = "MANUAL MODE";
+        _playbackModeLabel.AutoSize = false;
+        _playbackModeLabel.Size = new Size(176, 30);
+        _playbackModeLabel.Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold, GraphicsUnit.Point);
+        _playbackModeLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _playbackModeLabel.Location = new Point(332, 8);
+        _playbackModeLabel.Margin = new Padding(0);
+        _playbackModeLabel.Padding = new Padding(0);
+        ApplyPlaybackModeLabelTheme();
 
         _darkModeCheckBox.Text = "Dark Mode";
         _darkModeCheckBox.Checked = true;
@@ -916,6 +930,7 @@ internal sealed class MainForm : Form
         _cpuUsageLabel.Padding = new Padding(0);
 
         leftPanel.Controls.Add(title);
+        leftPanel.Controls.Add(_playbackModeLabel);
         leftPanel.Controls.Add(_statusLabel);
         rightTopRow.Controls.Add(_darkModeCheckBox);
         rightTopRow.Controls.Add(_cpuUsageLabel);
@@ -2429,6 +2444,12 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (ReferenceEquals(label, _playbackModeLabel))
+        {
+            ApplyPlaybackModeLabelTheme();
+            return;
+        }
+
         if (ReferenceEquals(label, _durationLabel) || ReferenceEquals(label, _currentTimeLabel))
         {
             label.BackColor = ThemePanelColor(dark);
@@ -2453,6 +2474,26 @@ internal sealed class MainForm : Form
         label.ForeColor = ReferenceEquals(label, _cpuUsageLabel)
             ? ThemeTextColor(dark)
             : ThemeMutedTextColor(dark);
+    }
+
+    private void UpdatePlaybackModeLabel()
+    {
+        if (_playbackModeLabel.IsDisposed)
+        {
+            return;
+        }
+
+        _playbackModeLabel.Text = _playlistPlaybackActive ? "PLAYLIST MODE" : "MANUAL MODE";
+        ApplyPlaybackModeLabelTheme();
+    }
+
+    private void ApplyPlaybackModeLabelTheme()
+    {
+        var playlistMode = _playlistPlaybackActive;
+        _playbackModeLabel.BackColor = playlistMode
+            ? Color.FromArgb(171, 113, 33)
+            : Color.FromArgb(39, 125, 87);
+        _playbackModeLabel.ForeColor = Color.White;
     }
 
     private void ApplySearchLibraryToolbarTextTheme()
@@ -6109,6 +6150,8 @@ internal sealed class MainForm : Form
 
     private void UpdatePlaylistButtons()
     {
+        UpdatePlaybackModeLabel();
+
         var selectedIndex = GetSelectedPlaylistIndex();
         var hasPlaylistSelection = selectedIndex.HasValue;
         var selectedPlayable = selectedIndex.HasValue &&
@@ -9703,6 +9746,9 @@ internal sealed class MainForm : Form
             await BeginScrubPreviewAsync(target);
         }
 
+        _reversePlaybackFrameCarry = 0d;
+        _reversePlaybackLastTickAt = DateTime.UtcNow;
+        _reversePlaybackSpeedTimer.Interval = GetReversePlaybackTimerInterval();
         _reversePlaybackSpeedTimer.Start();
         SetStatus($"Reverse {Math.Abs(speed).ToString("0.##", CultureInfo.InvariantCulture)}x", Color.FromArgb(232, 181, 105));
     }
@@ -9721,8 +9767,14 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var stepSeconds = Math.Abs(_reversePlaybackSpeed) * _reversePlaybackSpeedTimer.Interval / 1000d;
-        var target = GetCurrentSeekPosition() - TimeSpan.FromSeconds(stepSeconds);
+        var frameDuration = GetFrameDuration();
+        var framesToStep = GetReversePlaybackFrameStep(frameDuration);
+        if (framesToStep <= 0)
+        {
+            return;
+        }
+
+        var target = GetCurrentSeekPosition() - TimeSpan.FromTicks(frameDuration.Ticks * framesToStep);
         var reachedStart = target <= TimeSpan.Zero;
         if (reachedStart)
         {
@@ -9759,6 +9811,55 @@ internal sealed class MainForm : Form
     {
         _reversePlaybackSpeedTimer.Stop();
         _reversePlaybackSpeed = 0d;
+        _reversePlaybackFrameCarry = 0d;
+        _reversePlaybackLastTickAt = null;
+    }
+
+    private int GetReversePlaybackTimerInterval()
+    {
+        var frameMilliseconds = GetFrameDuration().TotalMilliseconds;
+        if (double.IsNaN(frameMilliseconds) || double.IsInfinity(frameMilliseconds) || frameMilliseconds <= 0d)
+        {
+            frameMilliseconds = 40d;
+        }
+
+        return Math.Clamp((int)Math.Round(frameMilliseconds), 10, 1000);
+    }
+
+    private int GetReversePlaybackFrameStep(TimeSpan frameDuration)
+    {
+        var now = DateTime.UtcNow;
+        var elapsed = _reversePlaybackLastTickAt.HasValue
+            ? now - _reversePlaybackLastTickAt.Value
+            : TimeSpan.FromMilliseconds(_reversePlaybackSpeedTimer.Interval);
+        _reversePlaybackLastTickAt = now;
+
+        if (elapsed <= TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.FromMilliseconds(_reversePlaybackSpeedTimer.Interval);
+        }
+
+        // Avoid one large visual jump if Windows stalls the UI timer for a moment.
+        if (elapsed > TimeSpan.FromMilliseconds(250))
+        {
+            elapsed = TimeSpan.FromMilliseconds(250);
+        }
+
+        var frameSeconds = frameDuration.TotalSeconds;
+        if (frameSeconds <= 0d)
+        {
+            frameSeconds = 1d / 25d;
+        }
+
+        _reversePlaybackFrameCarry += Math.Abs(_reversePlaybackSpeed) * elapsed.TotalSeconds / frameSeconds;
+        var framesToStep = (int)Math.Floor(_reversePlaybackFrameCarry);
+        if (framesToStep <= 0)
+        {
+            return 0;
+        }
+
+        _reversePlaybackFrameCarry -= framesToStep;
+        return framesToStep;
     }
 
     private bool CanUsePlaybackSpeed()
