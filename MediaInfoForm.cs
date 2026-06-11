@@ -2,6 +2,8 @@ namespace ffmpegplayer;
 
 internal sealed class MediaInfoForm : Form
 {
+    private const int PreferredWindowWidth = 480;
+
     private readonly string _path;
     private readonly CancellationTokenSource _loadCancellation = new();
     private readonly DataGridView _grid = new();
@@ -14,8 +16,8 @@ internal sealed class MediaInfoForm : Form
 
         Text = $"MediaInfo - {Path.GetFileName(path)}";
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(960, 700);
-        MinimumSize = new Size(570, 480);
+        Size = new Size(PreferredWindowWidth, 700);
+        MinimumSize = new Size(PreferredWindowWidth, 480);
         BackColor = Color.FromArgb(22, 25, 29);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         ShowInTaskbar = false;
@@ -110,7 +112,7 @@ internal sealed class MediaInfoForm : Form
         {
             Name = "Property",
             HeaderText = "Property",
-            Width = 210,
+            Width = 130,
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
         _grid.Columns.Add(new DataGridViewTextBoxColumn
@@ -224,8 +226,7 @@ internal sealed class MediaInfoForm : Form
         var area = Owner is not null
             ? Screen.FromControl(Owner).WorkingArea
             : Screen.FromControl(this).WorkingArea;
-        var referenceWidth = Owner?.Bounds.Width ?? area.Width;
-        var preferredWidth = Math.Clamp(referenceWidth / 2, MinimumSize.Width, area.Width);
+        var preferredWidth = Math.Clamp(PreferredWindowWidth, MinimumSize.Width, area.Width);
         Width = preferredWidth;
     }
 }
