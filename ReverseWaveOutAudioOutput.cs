@@ -11,16 +11,17 @@ internal sealed class ReverseWaveOutAudioOutput : IDisposable
     private const int WaveMapper = -1;
     private const int WaveFormatPcm = 1;
     private const int WhdrDone = 0x00000001;
-    private const int MaxPendingBuffers = 12;
+    private const int MaxPendingBuffers = 20;
 
     private readonly object _gate = new();
     private readonly List<WaveBuffer> _pendingBuffers = [];
     private readonly int _sourceChannels;
     private readonly int _outputChannels;
+    private readonly double _gain;
     private IntPtr _waveOut;
     private bool _disposed;
 
-    public ReverseWaveOutAudioOutput(int sourceChannels)
+    public ReverseWaveOutAudioOutput(int sourceChannels, double gain = 1d)
     {
         if (sourceChannels <= 0)
         {
@@ -29,6 +30,7 @@ internal sealed class ReverseWaveOutAudioOutput : IDisposable
 
         _sourceChannels = sourceChannels;
         _outputChannels = Math.Min(sourceChannels, 2);
+        _gain = Math.Clamp(gain, 0.05d, 1d);
         var format = new WaveFormatEx
         {
             FormatTag = WaveFormatPcm,
@@ -90,7 +92,7 @@ internal sealed class ReverseWaveOutAudioOutput : IDisposable
             {
                 var sourceOffset = checked((frame * _sourceChannels + channel) * SourceBytesPerSample);
                 var sample32 = BinaryPrimitives.ReadInt32LittleEndian(pcm32.AsSpan(sourceOffset, SourceBytesPerSample));
-                var sample16 = (short)Math.Clamp(sample32 / 65536, short.MinValue, short.MaxValue);
+                var sample16 = (short)Math.Clamp(sample32 / 65536d * _gain, short.MinValue, short.MaxValue);
                 var destinationOffset = checked((frame * _outputChannels + channel) * OutputBytesPerSample);
                 BinaryPrimitives.WriteInt16LittleEndian(pcm16.AsSpan(destinationOffset, OutputBytesPerSample), sample16);
             }

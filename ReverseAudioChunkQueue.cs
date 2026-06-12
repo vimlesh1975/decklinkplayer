@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
 
@@ -7,7 +8,6 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
 {
     private const int AudioSampleRate = 48000;
     private const int AudioBytesPerSample = 4;
-    private static readonly TimeSpan DecodeOutputBlockDuration = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan DecodeTimeout = TimeSpan.FromSeconds(3);
 
     private readonly PlayRequest _request;
@@ -27,7 +27,7 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
     public ReverseAudioChunkQueue(PlayRequest request, double speed, TimeSpan startPosition, Action<string>? logLine)
     {
         _request = request;
-        _speed = Math.Clamp(speed, 1d, 2d);
+        _speed = Math.Clamp(speed, 1d, 20d);
         _nextDecodeEnd = startPosition;
         _bytesPerSampleFrame = checked(request.AudioChannels * AudioBytesPerSample);
         _logLine = logLine;
@@ -83,7 +83,7 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
                 return;
             }
 
-            sourceDuration = TimeSpan.FromTicks((long)Math.Round(DecodeOutputBlockDuration.Ticks * _speed));
+            sourceDuration = TimeSpan.FromTicks((long)Math.Round(GetDecodeOutputBlockDuration(_speed).Ticks * _speed));
             decodeEnd = _nextDecodeEnd;
             sourceStart = decodeEnd - sourceDuration;
             if (sourceStart < TimeSpan.Zero)
@@ -103,11 +103,6 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
         }
 
         _ = Task.Run(() => DecodeBlockAsync(sourceStart, sourceDuration));
-    }
-
-    private int GetLowWaterBytes()
-    {
-        return checked((int)(AudioSampleRate * 0.25d) * _bytesPerSampleFrame);
     }
 
     private async Task DecodeBlockAsync(TimeSpan sourceStart, TimeSpan sourceDuration)
@@ -189,14 +184,14 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
                     : error);
             }
 
-            var pcm = output.ToArray();
-            var alignedLength = pcm.Length - pcm.Length % _bytesPerSampleFrame;
-            if (alignedLength != pcm.Length)
+            var sourcePcm = output.ToArray();
+            var alignedLength = sourcePcm.Length - sourcePcm.Length % _bytesPerSampleFrame;
+            if (alignedLength != sourcePcm.Length)
             {
-                Array.Resize(ref pcm, alignedLength);
+                Array.Resize(ref sourcePcm, alignedLength);
             }
 
-            return pcm;
+            return BuildReverseShuttlePcm(sourcePcm);
         }
         catch
         {
@@ -207,14 +202,6 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
 
     private IReadOnlyList<string> BuildArguments(TimeSpan sourceStart, TimeSpan sourceDuration)
     {
-        var filters = new List<string> { "areverse" };
-        if (_speed > 1.001d)
-        {
-            filters.Add($"atempo={_speed.ToString("0.###", CultureInfo.InvariantCulture)}");
-        }
-
-        filters.Add("aresample=async=0:first_pts=0");
-
         return
         [
             "-hide_banner",
@@ -231,7 +218,7 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
             "0:a:0?",
             "-vn",
             "-af",
-            string.Join(",", filters),
+            "aresample=async=0:first_pts=0",
             "-ac",
             _request.AudioChannels.ToString(CultureInfo.InvariantCulture),
             "-ar",
@@ -250,6 +237,100 @@ internal sealed class ReverseAudioChunkQueue : IDisposable
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault()
             ?.Trim() ?? string.Empty;
+    }
+
+    private static TimeSpan GetDecodeOutputBlockDuration(double speed)
+    {
+        if (speed >= 10d)
+        {
+            return TimeSpan.FromMilliseconds(300);
+        }
+
+        if (speed >= 5d)
+        {
+            return TimeSpan.FromMilliseconds(400);
+        }
+
+        if (speed >= 2d)
+        {
+            return TimeSpan.FromMilliseconds(1200);
+        }
+
+        return TimeSpan.FromMilliseconds(2200);
+    }
+
+    private int GetLowWaterBytes()
+    {
+        var seconds = _speed >= 10d
+            ? 0.8d
+            : _speed >= 5d
+                ? 1.0d
+                : _speed >= 2d
+                    ? 1.5d
+                    : 3.0d;
+        return checked((int)(AudioSampleRate * seconds) * _bytesPerSampleFrame);
+    }
+
+    private byte[] BuildReverseShuttlePcm(byte[] sourcePcm)
+    {
+        var sourceSampleFrames = sourcePcm.Length / _bytesPerSampleFrame;
+        if (sourceSampleFrames <= 0)
+        {
+            return [];
+        }
+
+        var outputSampleFrames = Math.Max(1, (int)Math.Floor(sourceSampleFrames / _speed));
+        var outputPcm = new byte[checked(outputSampleFrames * _bytesPerSampleFrame)];
+        var channels = _request.AudioChannels;
+        var previous = new double[channels];
+        var smoothing = GetSmoothing(_speed);
+
+        for (var outputFrame = 0; outputFrame < outputSampleFrames; outputFrame++)
+        {
+            var sourcePosition = Math.Max(0d, sourceSampleFrames - 1d - outputFrame * _speed);
+            var sourceFrame0 = (int)Math.Floor(sourcePosition);
+            var sourceFrame1 = Math.Min(sourceSampleFrames - 1, sourceFrame0 + 1);
+            var fraction = sourcePosition - sourceFrame0;
+
+            for (var channel = 0; channel < channels; channel++)
+            {
+                var sample0 = ReadSample(sourcePcm, sourceFrame0, channel, channels);
+                var sample1 = ReadSample(sourcePcm, sourceFrame1, channel, channels);
+                var sample = sample0 + (sample1 - sample0) * fraction;
+                if (outputFrame > 0 && smoothing > 0d)
+                {
+                    sample = sample * (1d - smoothing) + previous[channel] * smoothing;
+                }
+
+                previous[channel] = sample;
+                WriteSample(outputPcm, outputFrame, channel, channels, sample);
+            }
+        }
+
+        return outputPcm;
+    }
+
+    private static double GetSmoothing(double speed)
+    {
+        if (speed >= 10d)
+        {
+            return 0.35d;
+        }
+
+        return speed >= 5d ? 0.2d : 0d;
+    }
+
+    private static double ReadSample(byte[] pcm, int sampleFrame, int channel, int channels)
+    {
+        var offset = checked((sampleFrame * channels + channel) * AudioBytesPerSample);
+        return BinaryPrimitives.ReadInt32LittleEndian(pcm.AsSpan(offset, AudioBytesPerSample));
+    }
+
+    private static void WriteSample(byte[] pcm, int sampleFrame, int channel, int channels, double sample)
+    {
+        var offset = checked((sampleFrame * channels + channel) * AudioBytesPerSample);
+        var value = (int)Math.Clamp(sample, int.MinValue, int.MaxValue);
+        BinaryPrimitives.WriteInt32LittleEndian(pcm.AsSpan(offset, AudioBytesPerSample), value);
     }
 
     private static void TryKill(Process process)
