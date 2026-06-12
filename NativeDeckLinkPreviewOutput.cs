@@ -6,6 +6,7 @@ namespace ffmpegplayer;
 internal sealed class NativeDeckLinkPreviewOutput : IDisposable
 {
     private const int BytesPerPixelUyvy = 2;
+    private const int AudioBytesPerSample = 4;
 
     private readonly IDeckLink _deckLink;
     private readonly IDeckLinkOutput_v14_2_1? _outputV14;
@@ -18,6 +19,8 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
     private int _height;
     private int _rowBytes;
     private int _frameBytes;
+    private int _audioChannels;
+    private bool _audioEnabled;
     private bool _disposed;
 
     public NativeDeckLinkPreviewOutput(PlayRequest request)
@@ -114,6 +117,56 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
         throw new InvalidOperationException("DeckLink scrub output is not initialized.");
     }
 
+    public bool TryEnableAudio(int channels)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_audioEnabled)
+        {
+            return true;
+        }
+
+        if (_outputV14 is null || channels <= 0)
+        {
+            return false;
+        }
+
+        _outputV14.EnableAudioOutput(
+            _BMDAudioSampleRate.bmdAudioSampleRate48kHz,
+            _BMDAudioSampleType.bmdAudioSampleType32bitInteger,
+            (uint)channels,
+            _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
+        _audioChannels = channels;
+        _audioEnabled = true;
+        return true;
+    }
+
+    public void WriteAudioSamples(byte[] pcm, int sampleFrames)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!_audioEnabled || _outputV14 is null || sampleFrames <= 0)
+        {
+            return;
+        }
+
+        var bytesPerSampleFrame = checked(_audioChannels * AudioBytesPerSample);
+        var bytesToWrite = Math.Min(pcm.Length, checked(sampleFrames * bytesPerSampleFrame));
+        if (bytesToWrite <= 0)
+        {
+            return;
+        }
+
+        var buffer = Marshal.AllocHGlobal(bytesToWrite);
+        try
+        {
+            Marshal.Copy(pcm, 0, buffer, bytesToWrite);
+            _outputV14.WriteAudioSamplesSync(buffer, (uint)(bytesToWrite / bytesPerSampleFrame), out _);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
     private void DisplayFrameV14(byte[] uyvyFrame)
     {
         IDeckLinkMutableVideoFrame_v14_2_1? mutableFrame = null;
@@ -196,8 +249,37 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
             return;
         }
 
+        DisableAudioOutput();
         DeckLinkSdkPlayer.HoldVideoOutput(_device, _displayMode, _deckLink, _outputV14, null);
         _disposed = true;
+    }
+
+    private void DisableAudioOutput()
+    {
+        if (!_audioEnabled || _outputV14 is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _outputV14.FlushBufferedAudioSamples();
+        }
+        catch
+        {
+            // Best effort cleanup while switching back to live playback.
+        }
+
+        try
+        {
+            _outputV14.DisableAudioOutput();
+        }
+        catch
+        {
+            // Best effort cleanup while switching back to live playback.
+        }
+
+        _audioEnabled = false;
     }
 
     public void Dispose()
@@ -209,6 +291,8 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
 
         try
         {
+            DisableAudioOutput();
+
             if (_outputV14 is not null)
             {
                 _outputV14.DisableVideoOutput();

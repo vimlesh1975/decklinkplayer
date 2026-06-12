@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -238,6 +239,9 @@ internal sealed class MainForm : Form
     private CancellationTokenSource? _scrubPreviewDecodeCancellation;
     private CancellationTokenSource? _reversePlaybackCancellation;
     private Task? _scrubPreviewStartTask;
+    private ReverseAudioChunkQueue? _reverseAudio;
+    private ReversePcAudioOutput? _reversePcAudioOutput;
+    private ReverseWaveOutAudioOutput? _reverseWaveAudioOutput;
     private PlayRequest? _reverseDeckLinkRequest;
     private byte[]? _reverseDeckLinkFrame;
     private readonly List<PlaylistItem> _playlistItems = new();
@@ -8607,6 +8611,7 @@ internal sealed class MainForm : Form
     {
         _scrubSeekTimer.Stop();
         StopReverseDeckLinkFramePump();
+        DisposeReverseAudio();
         SetReverseCacheStatusFromAnyThread(null, Color.Empty);
         _pendingScrubPreviewOffset = null;
         _scrubPreviewDecodeCancellation?.Cancel();
@@ -9850,6 +9855,32 @@ internal sealed class MainForm : Form
         UpdatePositionBar(duration.Value, target);
         ResetAudioMeters();
         SetReverseCacheStatusFromAnyThread("CACHE", Color.FromArgb(232, 181, 105));
+        DisposeReverseAudio();
+        var frameDuration = GetFrameDuration();
+        var reverseAudioEnabled = !request.NoAudio && Math.Abs(speed) <= 2.001d;
+        if (reverseAudioEnabled)
+        {
+            _reverseAudio = new ReverseAudioChunkQueue(request, Math.Abs(speed), target, AppendLog);
+            try
+            {
+                _reverseWaveAudioOutput = new ReverseWaveOutAudioOutput(request.AudioChannels);
+                AppendLog("Reverse Windows audio monitor started.");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"Reverse Windows audio unavailable: {ex.Message}");
+            }
+
+            if (!previewOnly && _scrubPreviewOutput is not null && !_scrubPreviewOutput.TryEnableAudio(request.AudioChannels))
+            {
+                AppendLog("Reverse DeckLink audio unavailable on this SDK output interface; meters will still show decoded reverse audio.");
+            }
+        }
+        else if (!request.NoAudio && Math.Abs(speed) > 2.001d)
+        {
+            AppendLog("Reverse audio muted above -2x to keep high-speed shuttle smooth.");
+        }
+
         if (!previewOnly)
         {
             _reverseDeckLinkFrameTimer.Interval = GetReverseDeckLinkFrameInterval();
@@ -9871,7 +9902,7 @@ internal sealed class MainForm : Form
                 size.Height,
                 duration.Value,
                 target,
-                GetFrameDuration(),
+                frameDuration,
                 speed,
                 previewOnly,
                 cancellation),
@@ -9909,7 +9940,7 @@ internal sealed class MainForm : Form
                 position = ClampSeekOffset(cachedFrame.Position, duration);
                 cancellationToken.ThrowIfCancellationRequested();
                 UpdateReverseCacheStatusFromAnyThread(requestedPosition, cachedFrame.Position, cacheWait.Elapsed, frameDuration, requestedSpeedMagnitude);
-                if (!DisplayReverseCachedFrame(request, cachedFrame.Data, width, height, cachedFrame.Position, duration, previewOnly))
+                if (!DisplayReverseCachedFrame(request, cachedFrame.Data, width, height, cachedFrame.Position, duration, frameDuration, previewOnly))
                 {
                     break;
                 }
@@ -9972,6 +10003,7 @@ internal sealed class MainForm : Form
         int height,
         TimeSpan target,
         TimeSpan duration,
+        TimeSpan frameDuration,
         bool previewOnly)
     {
         if (IsDisposed || !IsHandleCreated)
@@ -9990,6 +10022,7 @@ internal sealed class MainForm : Form
                     height,
                     target,
                     duration,
+                    frameDuration,
                     previewOnly)));
             }
             catch
@@ -10020,10 +10053,90 @@ internal sealed class MainForm : Form
             SetReverseDeckLinkFrame(request, frame);
         }
 
+        PumpReverseAudioFrame(frameDuration, previewOnly);
         UpdateAppPreviewFrame(frame, width, height);
         SetStatus($"Reverse cache {FormatClock(target)}", Color.FromArgb(232, 181, 105));
         UpdateDurationLabel();
         return true;
+    }
+
+    private void PumpReverseAudioFrame(TimeSpan frameDuration, bool previewOnly)
+    {
+        var reverseAudio = _reverseAudio;
+        if (reverseAudio is null)
+        {
+            return;
+        }
+
+        var audioFrame = reverseAudio.ReadFrame(frameDuration);
+        if (!audioFrame.HasAudio)
+        {
+            return;
+        }
+
+        UpdateReverseAudioMeters(audioFrame.Pcm, audioFrame.SampleFrames);
+        var audioByteCount = audioFrame.SampleFrames * (int)_audioChannelsBox.Value * sizeof(int);
+        _reverseWaveAudioOutput?.Enqueue(audioFrame.Pcm, audioByteCount);
+        _reversePcAudioOutput?.Enqueue(audioFrame.Pcm, audioByteCount);
+        if (!previewOnly)
+        {
+            try
+            {
+                _scrubPreviewOutput?.WriteAudioSamples(audioFrame.Pcm, audioFrame.SampleFrames);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"Reverse DeckLink audio stopped: {ex.Message}");
+                DisposeReverseAudio();
+            }
+        }
+    }
+
+    private void UpdateReverseAudioMeters(byte[] pcm, int sampleFrames)
+    {
+        var channels = (int)_audioChannelsBox.Value;
+        var bytesPerSampleFrame = channels * sizeof(int);
+        if (channels <= 0 || bytesPerSampleFrame <= 0 || pcm.Length < bytesPerSampleFrame)
+        {
+            return;
+        }
+
+        var usableSampleFrames = Math.Min(sampleFrames, pcm.Length / bytesPerSampleFrame);
+        var peakLeft = 0L;
+        var peakRight = 0L;
+        for (var sampleFrame = 0; sampleFrame < usableSampleFrames; sampleFrame++)
+        {
+            var offset = sampleFrame * bytesPerSampleFrame;
+            var left = BinaryPrimitives.ReadInt32LittleEndian(pcm.AsSpan(offset, sizeof(int)));
+            var right = channels > 1
+                ? BinaryPrimitives.ReadInt32LittleEndian(pcm.AsSpan(offset + sizeof(int), sizeof(int)))
+                : left;
+            peakLeft = Math.Max(peakLeft, Math.Abs((long)left));
+            peakRight = Math.Max(peakRight, Math.Abs((long)right));
+        }
+
+        UpdateAudioMeters(ToDbfs(peakLeft), ToDbfs(peakRight));
+    }
+
+    private static double ToDbfs(long peak)
+    {
+        if (peak <= 0)
+        {
+            return -90;
+        }
+
+        var normalized = Math.Min(1.0, peak / (double)int.MaxValue);
+        return Math.Max(-90, 20 * Math.Log10(normalized));
+    }
+
+    private void DisposeReverseAudio()
+    {
+        _reverseWaveAudioOutput?.Dispose();
+        _reverseWaveAudioOutput = null;
+        _reversePcAudioOutput?.Dispose();
+        _reversePcAudioOutput = null;
+        _reverseAudio?.Dispose();
+        _reverseAudio = null;
     }
 
     private void UpdateReverseCacheStatusFromAnyThread(
@@ -10265,6 +10378,7 @@ internal sealed class MainForm : Form
         _reversePlaybackSpeed = 0d;
         _reversePlaybackFrameCarry = 0d;
         _reversePlaybackLastTickAt = null;
+        DisposeReverseAudio();
         SetReverseCacheStatusFromAnyThread(null, Color.Empty);
     }
 
@@ -10483,6 +10597,18 @@ internal sealed class MainForm : Form
     private string GetFfmpegPath()
     {
         return _deckLink.FindDefaultFfmpegPath();
+    }
+
+    private static string GetFfplayPath(string ffmpegPath)
+    {
+        var directory = Path.GetDirectoryName(ffmpegPath) ?? AppContext.BaseDirectory;
+        var ffplayPath = Path.Combine(directory, "ffplay.exe");
+        if (File.Exists(ffplayPath))
+        {
+            return ffplayPath;
+        }
+
+        throw new InvalidOperationException($"ffplay.exe not found next to {Path.GetFileName(ffmpegPath)}.");
     }
 
     private string GetFfprobePath()
