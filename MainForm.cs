@@ -242,6 +242,8 @@ internal sealed class MainForm : Form
     private ReverseAudioChunkQueue? _reverseAudio;
     private ReversePcAudioOutput? _reversePcAudioOutput;
     private ReverseWaveOutAudioOutput? _reverseWaveAudioOutput;
+    private ReverseDeckLinkAudioOutput? _reverseDeckLinkAudioOutput;
+    private bool _reverseDeckLinkAudioEnabled;
     private PlayRequest? _reverseDeckLinkRequest;
     private byte[]? _reverseDeckLinkFrame;
     private readonly List<PlaylistItem> _playlistItems = new();
@@ -9858,25 +9860,53 @@ internal sealed class MainForm : Form
         DisposeReverseAudio();
         var frameDuration = GetFrameDuration();
         var reverseAudioSpeed = Math.Abs(speed);
-        var reverseAudioEnabled = !request.NoAudio && reverseAudioSpeed <= 5.001d;
+        var reverseAudioEnabled = !request.NoAudio && reverseAudioSpeed <= 10.001d;
         if (reverseAudioEnabled)
         {
             _reverseAudio = new ReverseAudioChunkQueue(request, reverseAudioSpeed, target, AppendLog);
-            try
+            if (!previewOnly && reverseAudioSpeed <= 10.001d && _scrubPreviewOutput is not null)
             {
-                _reverseWaveAudioOutput = new ReverseWaveOutAudioOutput(request.AudioChannels, GetReverseAudioMonitorGain(reverseAudioSpeed));
-                AppendLog("Reverse Windows audio monitor started.");
+                try
+                {
+                    _reverseDeckLinkAudioEnabled = _scrubPreviewOutput.TryEnableAudio(request.AudioChannels);
+                    if (_reverseDeckLinkAudioEnabled)
+                    {
+                        AppendLog(reverseAudioSpeed > 2.001d
+                            ? "Reverse DeckLink audio enabled directly for high-speed shuttle test."
+                            : "Reverse DeckLink audio enabled.");
+                    }
+                    else
+                    {
+                        AppendLog("Reverse DeckLink audio unavailable on this SDK output interface.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _reverseDeckLinkAudioEnabled = false;
+                    AppendLog($"Reverse DeckLink audio unavailable: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            else if (!previewOnly && reverseAudioSpeed > 10.001d)
             {
-                AppendLog($"Reverse Windows audio unavailable: {ex.Message}");
+                AppendLog("Reverse DeckLink audio muted above -10x for stability.");
             }
 
-            AppendLog("Reverse audio monitor active. DeckLink reverse audio is muted while scrub output is single-frame driven.");
+            if (previewOnly || PcAudioMode)
+            {
+                try
+                {
+                    _reverseWaveAudioOutput = new ReverseWaveOutAudioOutput(request.AudioChannels, GetReverseAudioMonitorGain(reverseAudioSpeed));
+                    AppendLog("Reverse Windows audio monitor started.");
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"Reverse Windows audio unavailable: {ex.Message}");
+                }
+            }
         }
         else if (!request.NoAudio)
         {
-            AppendLog("Reverse audio muted above -5x to keep high-speed shuttle responsive.");
+            AppendLog("Reverse audio muted above -10x to keep high-speed shuttle responsive.");
         }
         if (!previewOnly)
         {
@@ -10071,12 +10101,48 @@ internal sealed class MainForm : Form
         {
             _reverseWaveAudioOutput?.Enqueue(audioFrame.Pcm, audioByteCount);
             _reversePcAudioOutput?.Enqueue(audioFrame.Pcm, audioByteCount);
+            WriteReverseDeckLinkAudio(audioFrame.Pcm, audioFrame.SampleFrames, previewOnly);
             return;
         }
 
         UpdateReverseAudioMeters(audioFrame.Pcm, audioFrame.SampleFrames);
         _reverseWaveAudioOutput?.Enqueue(audioFrame.Pcm, audioByteCount);
         _reversePcAudioOutput?.Enqueue(audioFrame.Pcm, audioByteCount);
+        WriteReverseDeckLinkAudio(audioFrame.Pcm, audioFrame.SampleFrames, previewOnly);
+    }
+
+    private void WriteReverseDeckLinkAudio(byte[] pcm, int sampleFrames, bool previewOnly)
+    {
+        if (!_reverseDeckLinkAudioEnabled || previewOnly || sampleFrames <= 0)
+        {
+            return;
+        }
+
+        var audioByteCount = sampleFrames * (int)_audioChannelsBox.Value * sizeof(int);
+        if (_reverseDeckLinkAudioOutput is not null)
+        {
+            if (!_reverseDeckLinkAudioOutput.Enqueue(pcm, audioByteCount, sampleFrames))
+            {
+                _reverseDeckLinkAudioEnabled = false;
+            }
+
+            return;
+        }
+
+        try
+        {
+            var wrote = _scrubPreviewOutput?.WriteAudioSamples(pcm, sampleFrames) == true;
+            if (!wrote)
+            {
+                _reverseDeckLinkAudioEnabled = false;
+                AppendLog("Reverse DeckLink audio stopped: audio write stalled or output is unavailable.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _reverseDeckLinkAudioEnabled = false;
+            AppendLog($"Reverse DeckLink audio stopped: {ex.Message}");
+        }
     }
 
     private void UpdateReverseAudioMeters(byte[] pcm, int sampleFrames)
@@ -10133,6 +10199,9 @@ internal sealed class MainForm : Form
 
     private void DisposeReverseAudio()
     {
+        _reverseDeckLinkAudioEnabled = false;
+        _reverseDeckLinkAudioOutput?.Dispose();
+        _reverseDeckLinkAudioOutput = null;
         _reverseWaveAudioOutput?.Dispose();
         _reverseWaveAudioOutput = null;
         _reversePcAudioOutput?.Dispose();

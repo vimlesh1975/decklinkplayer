@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using DeckLinkAPI;
 
@@ -7,12 +8,15 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
 {
     private const int BytesPerPixelUyvy = 2;
     private const int AudioBytesPerSample = 4;
+    private const int AudioWriteZeroRetryDelayMs = 2;
+    private const int AudioWriteStallTimeoutMilliseconds = 500;
 
     private readonly IDeckLink _deckLink;
     private readonly IDeckLinkOutput_v14_2_1? _outputV14;
     private readonly IDeckLinkOutput_v11_4? _outputV11;
     private readonly IDeckLinkOutput_v10_11? _outputV10;
     private readonly IDeckLinkOutput? _displayModeOutput;
+    private readonly object _outputLock = new();
     private readonly string _device;
     private readonly _BMDDisplayMode _displayMode;
     private int _width;
@@ -125,41 +129,112 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
             return true;
         }
 
-        if (_outputV14 is null || channels <= 0)
+        if (channels <= 0)
         {
             return false;
         }
 
-        _outputV14.EnableAudioOutput(
-            _BMDAudioSampleRate.bmdAudioSampleRate48kHz,
-            _BMDAudioSampleType.bmdAudioSampleType32bitInteger,
-            (uint)channels,
-            _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
+        lock (_outputLock)
+        {
+            if (_outputV14 is not null)
+            {
+                _outputV14.EnableAudioOutput(
+                    _BMDAudioSampleRate.bmdAudioSampleRate48kHz,
+                    _BMDAudioSampleType.bmdAudioSampleType32bitInteger,
+                    (uint)channels,
+                    _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
+            }
+            else if (_outputV11 is not null)
+            {
+                _outputV11.EnableAudioOutput(
+                    _BMDAudioSampleRate.bmdAudioSampleRate48kHz,
+                    _BMDAudioSampleType.bmdAudioSampleType32bitInteger,
+                    (uint)channels,
+                    _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
+            }
+            else if (_outputV10 is not null)
+            {
+                _outputV10.EnableAudioOutput(
+                    _BMDAudioSampleRate.bmdAudioSampleRate48kHz,
+                    _BMDAudioSampleType.bmdAudioSampleType32bitInteger,
+                    (uint)channels,
+                    _BMDAudioOutputStreamType.bmdAudioOutputStreamContinuous);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
         _audioChannels = channels;
         _audioEnabled = true;
         return true;
     }
 
-    public void WriteAudioSamples(byte[] pcm, int sampleFrames)
+    public bool WriteAudioSamples(byte[] pcm, int sampleFrames)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (!_audioEnabled || _outputV14 is null || sampleFrames <= 0)
+        if (!_audioEnabled || sampleFrames <= 0)
         {
-            return;
+            return false;
         }
 
         var bytesPerSampleFrame = checked(_audioChannels * AudioBytesPerSample);
         var bytesToWrite = Math.Min(pcm.Length, checked(sampleFrames * bytesPerSampleFrame));
         if (bytesToWrite <= 0)
         {
-            return;
+            return false;
         }
 
+        var sampleFramesToWrite = (uint)(bytesToWrite / bytesPerSampleFrame);
         var buffer = Marshal.AllocHGlobal(bytesToWrite);
         try
         {
             Marshal.Copy(pcm, 0, buffer, bytesToWrite);
-            _outputV14.WriteAudioSamplesSync(buffer, (uint)(bytesToWrite / bytesPerSampleFrame), out _);
+            var totalWritten = 0u;
+            var zeroWriteWait = Stopwatch.StartNew();
+
+            while (totalWritten < sampleFramesToWrite)
+            {
+                var remaining = sampleFramesToWrite - totalWritten;
+                var offset = IntPtr.Add(buffer, checked((int)totalWritten * bytesPerSampleFrame));
+                uint written;
+                lock (_outputLock)
+                {
+                    if (_outputV14 is not null)
+                    {
+                        _outputV14.WriteAudioSamplesSync(offset, remaining, out written);
+                    }
+                    else if (_outputV11 is not null)
+                    {
+                        _outputV11.WriteAudioSamplesSync(offset, remaining, out written);
+                    }
+                    else if (_outputV10 is not null)
+                    {
+                        _outputV10.WriteAudioSamplesSync(offset, remaining, out written);
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+
+                if (written > 0)
+                {
+                    totalWritten += written;
+                    zeroWriteWait.Restart();
+                    continue;
+                }
+
+                if (zeroWriteWait.ElapsedMilliseconds >= AudioWriteStallTimeoutMilliseconds)
+                {
+                    return false;
+                }
+
+                Thread.Sleep(AudioWriteZeroRetryDelayMs);
+            }
+
+            return totalWritten > 0;
         }
         finally
         {
@@ -172,17 +247,23 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
         IDeckLinkMutableVideoFrame_v14_2_1? mutableFrame = null;
         try
         {
-            _outputV14!.CreateVideoFrame(
-                _width,
-                _height,
-                _rowBytes,
-                _BMDPixelFormat.bmdFormat8BitYUV,
-                _BMDFrameFlags.bmdFrameFlagDefault,
-                out mutableFrame);
+            lock (_outputLock)
+            {
+                _outputV14!.CreateVideoFrame(
+                    _width,
+                    _height,
+                    _rowBytes,
+                    _BMDPixelFormat.bmdFormat8BitYUV,
+                    _BMDFrameFlags.bmdFrameFlagDefault,
+                    out mutableFrame);
+            }
 
             mutableFrame.GetBytes(out var destination);
             Marshal.Copy(uyvyFrame, 0, destination, _frameBytes);
-            _outputV14.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
+            lock (_outputLock)
+            {
+                _outputV14.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
+            }
         }
         finally
         {
@@ -195,17 +276,23 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
         IDeckLinkMutableVideoFrame_v14_2_1? mutableFrame = null;
         try
         {
-            _outputV11!.CreateVideoFrame(
-                _width,
-                _height,
-                _rowBytes,
-                _BMDPixelFormat.bmdFormat8BitYUV,
-                _BMDFrameFlags.bmdFrameFlagDefault,
-                out mutableFrame);
+            lock (_outputLock)
+            {
+                _outputV11!.CreateVideoFrame(
+                    _width,
+                    _height,
+                    _rowBytes,
+                    _BMDPixelFormat.bmdFormat8BitYUV,
+                    _BMDFrameFlags.bmdFrameFlagDefault,
+                    out mutableFrame);
+            }
 
             mutableFrame.GetBytes(out var destination);
             Marshal.Copy(uyvyFrame, 0, destination, _frameBytes);
-            _outputV11.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
+            lock (_outputLock)
+            {
+                _outputV11.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
+            }
         }
         finally
         {
@@ -218,17 +305,23 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
         IDeckLinkMutableVideoFrame_v14_2_1? mutableFrame = null;
         try
         {
-            _outputV10!.CreateVideoFrame(
-                _width,
-                _height,
-                _rowBytes,
-                _BMDPixelFormat.bmdFormat8BitYUV,
-                _BMDFrameFlags.bmdFrameFlagDefault,
-                out mutableFrame);
+            lock (_outputLock)
+            {
+                _outputV10!.CreateVideoFrame(
+                    _width,
+                    _height,
+                    _rowBytes,
+                    _BMDPixelFormat.bmdFormat8BitYUV,
+                    _BMDFrameFlags.bmdFrameFlagDefault,
+                    out mutableFrame);
+            }
 
             mutableFrame.GetBytes(out var destination);
             Marshal.Copy(uyvyFrame, 0, destination, _frameBytes);
-            _outputV10.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
+            lock (_outputLock)
+            {
+                _outputV10.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
+            }
         }
         finally
         {
@@ -256,14 +349,28 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
 
     private void DisableAudioOutput()
     {
-        if (!_audioEnabled || _outputV14 is null)
+        if (!_audioEnabled)
         {
             return;
         }
 
         try
         {
-            _outputV14.FlushBufferedAudioSamples();
+            lock (_outputLock)
+            {
+                if (_outputV14 is not null)
+                {
+                    _outputV14.FlushBufferedAudioSamples();
+                }
+                else if (_outputV11 is not null)
+                {
+                    _outputV11.FlushBufferedAudioSamples();
+                }
+                else
+                {
+                    _outputV10?.FlushBufferedAudioSamples();
+                }
+            }
         }
         catch
         {
@@ -272,7 +379,21 @@ internal sealed class NativeDeckLinkPreviewOutput : IDisposable
 
         try
         {
-            _outputV14.DisableAudioOutput();
+            lock (_outputLock)
+            {
+                if (_outputV14 is not null)
+                {
+                    _outputV14.DisableAudioOutput();
+                }
+                else if (_outputV11 is not null)
+                {
+                    _outputV11.DisableAudioOutput();
+                }
+                else
+                {
+                    _outputV10?.DisableAudioOutput();
+                }
+            }
         }
         catch
         {
