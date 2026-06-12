@@ -188,10 +188,16 @@ internal sealed partial class FfmpegDeckLink
 
         if (!options.NoAudio)
         {
+            var audioFilters = BuildAudioFilters(options);
             if (!string.IsNullOrWhiteSpace(options.AudioFilter))
             {
+                audioFilters.Insert(0, options.AudioFilter);
+            }
+
+            if (audioFilters.Count > 0)
+            {
                 args.Add("-af");
-                args.Add(options.AudioFilter);
+                args.Add(string.Join(",", audioFilters));
             }
 
             args.Add("-ac");
@@ -305,6 +311,22 @@ internal sealed partial class FfmpegDeckLink
         if (options.IsInterlaced)
         {
             filters.Add($"setfield={GetSetFieldMode(options.FieldOrder)}");
+        }
+
+        return filters;
+    }
+
+    private static List<string> BuildAudioFilters(PlayRequest options)
+    {
+        var filters = new List<string>();
+        if (options.AudioSyncMilliseconds > 0)
+        {
+            filters.Add($"adelay={options.AudioSyncMilliseconds}:all=1");
+        }
+        else if (options.AudioSyncMilliseconds < 0)
+        {
+            filters.Add($"atrim=start={(-options.AudioSyncMilliseconds / 1000d).ToString("0.###", CultureInfo.InvariantCulture)}");
+            filters.Add("asetpts=PTS-STARTPTS");
         }
 
         return filters;
@@ -597,7 +619,8 @@ internal sealed record PlayRequest(
     bool UseTestPattern,
     TimeSpan StartOffset = default,
     TimeSpan? Duration = null,
-    PlaylistTransitionSegment? TransitionSegment = null);
+    PlaylistTransitionSegment? TransitionSegment = null,
+    int AudioSyncMilliseconds = 0);
 
 internal sealed record PlaylistTransitionSegment(
     string NextInputPath,

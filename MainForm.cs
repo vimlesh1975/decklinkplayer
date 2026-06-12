@@ -60,6 +60,8 @@ internal sealed class MainForm : Form
     private const int SeekGroupWidth = AppPreviewPanelWidth;
     private const int SeekPositiveGroupGap = 8;
     private const int TransportSpanWidth = PreviewColumnWidth;
+    private const int AudioSyncSliderStepMilliseconds = 5;
+    private const int AudioSyncRangeMilliseconds = 1000;
     private int MainAreaHeight => Math.Max(640, ClientSize.Height - RootPadding * 2 - HeaderRowHeight - SettingsAreaVerticalPadding);
     private int SourcePanelHeight => MainAreaHeight;
     private int DetailsPanelHeight => Math.Max(0, MainAreaHeight - AppPreviewAreaHeight - ActionRowHeight - ToggleRowHeight);
@@ -156,6 +158,8 @@ internal sealed class MainForm : Form
     private readonly TextBox _frameRateBox = new();
     private readonly TextBox _pixelFormatBox = new();
     private readonly NumericUpDown _audioChannelsBox = new();
+    private readonly TrackBar _audioSyncSlider = new();
+    private readonly Label _audioSyncValueLabel = new();
     private readonly NumericUpDown _prerollBox = new();
     private readonly ComboBox _duplexBox = new();
     private readonly ComboBox _linkBox = new();
@@ -480,6 +484,8 @@ internal sealed class MainForm : Form
             SetTextSetting(_frameRateBox, settings, "FrameRate");
             SetTextSetting(_pixelFormatBox, settings, "PixelFormat");
             SetNumericSetting(_audioChannelsBox, settings, "AudioChannels");
+            SetTrackBarSetting(_audioSyncSlider, settings, "AudioSyncMs", AudioSyncSliderStepMilliseconds);
+            UpdateAudioSyncSliderLabel();
             SetNumericSetting(_prerollBox, settings, "PrerollSeconds");
             SelectComboValue(_duplexBox, GetSetting(settings, "Duplex"));
             SelectComboValue(_linkBox, GetSetting(settings, "Link"));
@@ -538,6 +544,7 @@ internal sealed class MainForm : Form
                     $"FrameRate={_frameRateBox.Text.Trim()}",
                     $"PixelFormat={_pixelFormatBox.Text.Trim()}",
                     $"AudioChannels={_audioChannelsBox.Value.ToString(CultureInfo.InvariantCulture)}",
+                    $"AudioSyncMs={GetAudioSyncMilliseconds().ToString(CultureInfo.InvariantCulture)}",
                     $"PrerollSeconds={_prerollBox.Value.ToString(CultureInfo.InvariantCulture)}",
                     $"Duplex={_duplexBox.SelectedItem?.ToString() ?? string.Empty}",
                     $"Link={_linkBox.SelectedItem?.ToString() ?? string.Empty}",
@@ -613,6 +620,20 @@ internal sealed class MainForm : Form
         }
 
         numericUpDown.Value = Math.Clamp(value, numericUpDown.Minimum, numericUpDown.Maximum);
+    }
+
+    private static void SetTrackBarSetting(TrackBar trackBar, Dictionary<string, string> settings, string key, int valueStep)
+    {
+        if (!settings.TryGetValue(key, out var rawValue) ||
+            !decimal.TryParse(rawValue, NumberStyles.Number, CultureInfo.InvariantCulture, out var value))
+        {
+            return;
+        }
+
+        var steppedValue = valueStep > 0
+            ? (int)Math.Round((double)value / valueStep)
+            : (int)Math.Round(value);
+        trackBar.Value = Math.Clamp(steppedValue, trackBar.Minimum, trackBar.Maximum);
     }
 
     private static void SelectComboValue(ComboBox comboBox, string? value)
@@ -1223,17 +1244,24 @@ internal sealed class MainForm : Form
     private Control BuildOutputPanel()
     {
         var panel = BuildSection("DeckLink Output");
+        panel.Padding = new Padding(8, 30, 8, 4);
+        if (panel.Controls.OfType<Label>().FirstOrDefault() is { } titleLabel)
+        {
+            titleLabel.Location = new Point(8, 6);
+            titleLabel.Size = new Size(220, 18);
+            titleLabel.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold, GraphicsUnit.Point);
+        }
+
         var content = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 3,
             BackColor = panel.BackColor,
         };
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 75));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
 
         _deviceBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _modeBox.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -1257,21 +1285,20 @@ internal sealed class MainForm : Form
             SaveAppSettings();
         };
 
-        content.Controls.Add(BuildInputRow("Device", _deviceBox, _refreshDevicesButton), 0, 0);
-        content.Controls.Add(BuildInputRow("Mode", _modeBox, _refreshModesButton), 0, 1);
+        content.Controls.Add(BuildDeckLinkDeviceModeRow(), 0, 0);
 
         var outputGrid = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             ColumnCount = 4,
-            RowCount = 2,
-            Height = 92,
-            Padding = new Padding(0, 8, 0, 0),
+            RowCount = 3,
+            Height = 75,
+            Padding = new Padding(0),
         };
 
-        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
+        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
         outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 86));
+        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
         outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
 
         _videoSizeBox.PlaceholderText = "1920x1080";
@@ -1279,6 +1306,15 @@ internal sealed class MainForm : Form
         _audioChannelsBox.Minimum = 2;
         _audioChannelsBox.Maximum = 16;
         _audioChannelsBox.Increment = 2;
+        _audioSyncSlider.Minimum = -AudioSyncRangeMilliseconds / AudioSyncSliderStepMilliseconds;
+        _audioSyncSlider.Maximum = AudioSyncRangeMilliseconds / AudioSyncSliderStepMilliseconds;
+        _audioSyncSlider.SmallChange = 1;
+        _audioSyncSlider.LargeChange = 5;
+        _audioSyncSlider.TickFrequency = 20;
+        _audioSyncSlider.TickStyle = TickStyle.None;
+        _audioSyncSlider.AutoSize = false;
+        _audioSyncSlider.Height = 22;
+        UpdateAudioSyncSliderLabel();
         _prerollBox.Minimum = 0;
         _prerollBox.Maximum = 5;
         _prerollBox.DecimalPlaces = 1;
@@ -1291,30 +1327,31 @@ internal sealed class MainForm : Form
         _levelABox.Items.AddRange(["unset", "true", "false"]);
         RegisterDeckLinkSettingsPersistenceEvents();
 
-        AddGridField(outputGrid, "Size", _videoSizeBox, 0, 0);
-        AddGridField(outputGrid, "Rate", _frameRateBox, 2, 0);
-        AddGridField(outputGrid, "Audio", _audioChannelsBox, 0, 1);
-        AddGridField(outputGrid, "Preroll", _prerollBox, 2, 1);
+        AddCompactGridField(outputGrid, "Size", _videoSizeBox, 0, 0);
+        AddCompactGridField(outputGrid, "Rate", _frameRateBox, 2, 0);
+        AddCompactGridField(outputGrid, "Audio", _audioChannelsBox, 0, 1);
+        AddCompactGridField(outputGrid, "Preroll", _prerollBox, 2, 1);
 
-        content.Controls.Add(outputGrid, 0, 2);
+        content.Controls.Add(outputGrid, 0, 1);
 
         var tailGrid = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             ColumnCount = 4,
             RowCount = 2,
-            Height = 84,
+            Height = 50,
+            Padding = new Padding(0),
         };
-        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
+        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
         tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 86));
+        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
         tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
 
-        AddGridField(tailGrid, "Pixel", _pixelFormatBox, 0, 0);
-        AddGridField(tailGrid, "Duplex", _duplexBox, 2, 0);
-        AddGridField(tailGrid, "Link", _linkBox, 0, 1);
-        AddGridField(tailGrid, "Level A", _levelABox, 2, 1);
-        content.Controls.Add(tailGrid, 0, 3);
+        AddCompactGridField(tailGrid, "Pixel", _pixelFormatBox, 0, 0);
+        AddCompactGridField(tailGrid, "Duplex", _duplexBox, 2, 0);
+        AddCompactGridField(tailGrid, "Link", _linkBox, 0, 1);
+        AddCompactGridField(tailGrid, "Level A", _levelABox, 2, 1);
+        content.Controls.Add(tailGrid, 0, 2);
 
         panel.Controls.Add(content);
         return panel;
@@ -1330,10 +1367,44 @@ internal sealed class MainForm : Form
         };
         _pixelFormatBox.TextChanged += (_, _) => SaveAppSettings();
         _audioChannelsBox.ValueChanged += (_, _) => SaveAppSettings();
+        _audioSyncSlider.ValueChanged += (_, _) => AudioSyncSlider_ValueChanged();
         _prerollBox.ValueChanged += (_, _) => SaveAppSettings();
         _duplexBox.SelectedIndexChanged += (_, _) => SaveAppSettings();
         _linkBox.SelectedIndexChanged += (_, _) => SaveAppSettings();
         _levelABox.SelectedIndexChanged += (_, _) => SaveAppSettings();
+    }
+
+    private void AudioSyncSlider_ValueChanged()
+    {
+        var audioSyncMs = GetAudioSyncMilliseconds();
+        UpdateAudioSyncSliderLabel();
+        if (_playbackPauseController is not null)
+        {
+            _playbackPauseController.AudioSyncMilliseconds = audioSyncMs;
+            SetStatus($"Audio sync {FormatSignedMilliseconds(audioSyncMs)}", Color.FromArgb(232, 181, 105));
+        }
+
+        SaveAppSettings();
+    }
+
+    private int GetAudioSyncMilliseconds()
+    {
+        return _audioSyncSlider.Value * AudioSyncSliderStepMilliseconds;
+    }
+
+    private void UpdateAudioSyncSliderLabel()
+    {
+        _audioSyncValueLabel.Text = FormatSignedMilliseconds(GetAudioSyncMilliseconds());
+    }
+
+    private static string FormatSignedMilliseconds(int milliseconds)
+    {
+        return milliseconds switch
+        {
+            > 0 => $"+{milliseconds.ToString(CultureInfo.InvariantCulture)} ms",
+            < 0 => $"{milliseconds.ToString(CultureInfo.InvariantCulture)} ms",
+            _ => "0 ms",
+        };
     }
 
     private Control BuildDetailsPanel()
@@ -1738,6 +1809,7 @@ internal sealed class MainForm : Form
         _pcAudioCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
         _pcAudioCheckBox.CheckedChanged += (_, _) => SaveAppSettings();
         panel.Controls.Add(_pcAudioCheckBox);
+        panel.Controls.Add(BuildAudioSyncTrimControl());
         return panel;
     }
 
@@ -2143,6 +2215,78 @@ internal sealed class MainForm : Form
         return row;
     }
 
+    private Control BuildDeckLinkDeviceModeRow()
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            ColumnCount = 6,
+            RowCount = 1,
+            Height = 28,
+            Padding = new Padding(0),
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
+
+        row.Controls.Add(BuildLabel("Device"), 0, 0);
+        row.Controls.Add(StyleCompactInput(_deviceBox), 1, 0);
+        _refreshDevicesButton.Dock = DockStyle.Fill;
+        _refreshDevicesButton.Margin = new Padding(4, 0, 4, 2);
+        row.Controls.Add(_refreshDevicesButton, 2, 0);
+
+        row.Controls.Add(BuildLabel("Mode"), 3, 0);
+        row.Controls.Add(StyleCompactInput(_modeBox), 4, 0);
+        _refreshModesButton.Dock = DockStyle.Fill;
+        _refreshModesButton.Margin = new Padding(4, 0, 0, 2);
+        row.Controls.Add(_refreshModesButton, 5, 0);
+        return row;
+    }
+
+    private Control BuildAudioSyncTrimControl()
+    {
+        var cell = new TableLayoutPanel
+        {
+            Width = 444,
+            Height = 34,
+            ColumnCount = 3,
+            RowCount = 1,
+            Padding = new Padding(0),
+            Margin = new Padding(8, 0, 0, 0),
+            BackColor = BackColor,
+        };
+        cell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        cell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        cell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
+
+        var label = new Label
+        {
+            Text = "A/V Sync",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Color.FromArgb(166, 179, 190),
+            Margin = new Padding(0),
+        };
+
+        _audioSyncSlider.Dock = DockStyle.Fill;
+        _audioSyncSlider.Margin = new Padding(0, 4, 4, 0);
+        _audioSyncValueLabel.Dock = DockStyle.Fill;
+        _audioSyncValueLabel.TextAlign = ContentAlignment.MiddleRight;
+        _audioSyncValueLabel.ForeColor = Color.FromArgb(232, 237, 240);
+        _audioSyncValueLabel.Margin = new Padding(0);
+
+        cell.Controls.Add(label, 0, 0);
+        cell.Controls.Add(_audioSyncSlider, 1, 0);
+        cell.Controls.Add(_audioSyncValueLabel, 2, 0);
+        SetButtonToolTip(label, "Live audio offset: negative makes audio earlier, positive makes audio later.");
+        SetButtonToolTip(_audioSyncSlider, "Live audio offset: negative makes audio earlier, positive makes audio later.");
+        SetButtonToolTip(_audioSyncValueLabel, "Current live audio sync offset.");
+        return cell;
+    }
+
     private Control BuildLibraryRow()
     {
         var row = new TableLayoutPanel
@@ -2320,6 +2464,12 @@ internal sealed class MainForm : Form
         grid.Controls.Add(StyleInput(input), column + 1, row);
     }
 
+    private static void AddCompactGridField(TableLayoutPanel grid, string labelText, Control input, int column, int row)
+    {
+        grid.Controls.Add(BuildLabel(labelText), column, row);
+        grid.Controls.Add(StyleCompactInput(input), column + 1, row);
+    }
+
     private static Label BuildLabel(string text)
     {
         return new Label
@@ -2347,6 +2497,13 @@ internal sealed class MainForm : Form
             comboBox.FlatStyle = FlatStyle.Flat;
         }
 
+        return input;
+    }
+
+    private static Control StyleCompactInput(Control input)
+    {
+        StyleInput(input);
+        input.Margin = new Padding(0, 0, 4, 2);
         return input;
     }
 
@@ -9444,6 +9601,7 @@ internal sealed class MainForm : Form
             var pauseController = new PlaybackPauseController
             {
                 PlaybackSpeed = _selectedPlaybackSpeed > 0d ? _selectedPlaybackSpeed : 1d,
+                AudioSyncMilliseconds = request.AudioSyncMilliseconds,
             };
             if (startPaused)
             {
@@ -10641,7 +10799,8 @@ internal sealed class MainForm : Form
             useTestPattern,
             normalizedStartOffset,
             normalizedPlayDuration,
-            transitionSegment);
+            transitionSegment,
+            AudioSyncMilliseconds: GetAudioSyncMilliseconds());
     }
 
     private async Task RunUiTaskAsync(string status, Func<CancellationToken, Task> task)
