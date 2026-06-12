@@ -97,6 +97,98 @@ internal sealed unsafe class NativeFfmpegFrameDecoder : IDisposable
         throw new InvalidOperationException("No video frame decoded at seek position.");
     }
 
+    public List<DecodedVideoFrame> DecodeFrames(
+        TimeSpan start,
+        int frameCount,
+        TimeSpan frameInterval,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (frameCount <= 0)
+        {
+            return [];
+        }
+
+        if (frameInterval <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException("Frame interval must be positive.");
+        }
+
+        if (start < TimeSpan.Zero)
+        {
+            start = TimeSpan.Zero;
+        }
+
+        Seek(start);
+
+        var frameStepSeconds = frameInterval.TotalSeconds;
+        var halfFrameSeconds = frameStepSeconds / 2d;
+        var startSeconds = start.TotalSeconds;
+        var targetSeconds = startSeconds;
+        var maxTargetSeconds = startSeconds + Math.Max(0, frameCount - 1) * frameStepSeconds;
+        var frames = new List<DecodedVideoFrame>(frameCount);
+        var convertedFrame = new byte[checked(_outputWidth * _outputHeight * 2)];
+        var decodedFrames = 0;
+
+        while (ffmpeg.av_read_frame(_formatContext, _packet) >= 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (_packet->stream_index != _videoStreamIndex)
+                {
+                    continue;
+                }
+
+                ThrowIfError(ffmpeg.avcodec_send_packet(_codecContext, _packet), "send video packet");
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var receiveResult = ffmpeg.avcodec_receive_frame(_codecContext, _frame);
+                    if (receiveResult == ffmpeg.AVERROR(ffmpeg.EAGAIN) || receiveResult == ffmpeg.AVERROR_EOF)
+                    {
+                        break;
+                    }
+
+                    ThrowIfError(receiveResult, "receive video frame");
+                    decodedFrames++;
+                    var frameSeconds = GetFrameSeconds(_frame) ??
+                        startSeconds + Math.Max(0, decodedFrames - 1) * frameStepSeconds;
+                    if (frameSeconds + halfFrameSeconds < targetSeconds)
+                    {
+                        continue;
+                    }
+
+                    ConvertFrame(convertedFrame);
+                    while (frames.Count < frameCount && targetSeconds <= frameSeconds + halfFrameSeconds)
+                    {
+                        var frameCopy = new byte[convertedFrame.Length];
+                        Buffer.BlockCopy(convertedFrame, 0, frameCopy, 0, convertedFrame.Length);
+                        frames.Add(new DecodedVideoFrame(TimeSpan.FromSeconds(targetSeconds), frameCopy));
+                        targetSeconds = startSeconds + frames.Count * frameStepSeconds;
+                    }
+
+                    if (frames.Count >= frameCount)
+                    {
+                        return frames;
+                    }
+
+                    if (frameSeconds > maxTargetSeconds + frameStepSeconds * 4d)
+                    {
+                        return frames;
+                    }
+                }
+            }
+            finally
+            {
+                ffmpeg.av_packet_unref(_packet);
+            }
+        }
+
+        return frames;
+    }
+
     private void Open(string path, int outputWidth, int outputHeight)
     {
         _outputWidth = outputWidth;
@@ -308,3 +400,5 @@ internal sealed unsafe class NativeFfmpegFrameDecoder : IDisposable
         _disposed = true;
     }
 }
+
+internal sealed record DecodedVideoFrame(TimeSpan Position, byte[] Data);

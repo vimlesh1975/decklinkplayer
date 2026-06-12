@@ -47,6 +47,7 @@ internal sealed class MainForm : Form
     private const int SettingsAreaVerticalPadding = 12;
     private const int PlaylistGridHeight = 430;
     private const int PlaylistControlRowHeight = 42;
+    private static readonly TimeSpan ReverseDeckLinkRetryInterval = TimeSpan.FromMilliseconds(500);
     private const int AppPreviewWidth = 848;
     private const int AppPreviewHeight = 477;
     private const int AppPreviewAreaHeight = AppPreviewHeight + RemainingTimeRowHeight + CurrentTimeRowHeight;
@@ -233,6 +234,7 @@ internal sealed class MainForm : Form
     private NativeDeckLinkPreviewOutput? _scrubPreviewOutput;
     private PreviewFrameHelperClient? _scrubPreviewHelper;
     private CancellationTokenSource? _scrubPreviewDecodeCancellation;
+    private CancellationTokenSource? _reversePlaybackCancellation;
     private Task? _scrubPreviewStartTask;
     private readonly List<PlaylistItem> _playlistItems = new();
     private PlaylistItem? _playlistClipboardItem;
@@ -267,6 +269,8 @@ internal sealed class MainForm : Form
     private string? _scrubPreviewModeCode;
     private string? _scrubPreviewHelperDisabledPath;
     private string? _scrubPreviewOutputDisabledPath;
+    private DateTime _nextReverseDeckLinkRetryAt = DateTime.MinValue;
+    private DateTime _lastReverseDeckLinkFailureLogAt = DateTime.MinValue;
     private string _mediaRootPath = DefaultMediaRootPath;
     private string? _selectedMediaFolderPath;
     private int? _playlistPlayingIndex;
@@ -7571,7 +7575,7 @@ internal sealed class MainForm : Form
             !IsImageFile(path);
     }
 
-    private async Task BeginScrubPreviewAsync(TimeSpan target)
+    private async Task BeginScrubPreviewAsync(TimeSpan target, bool queueInitialFrame = true)
     {
         var duration = GetCurrentSeekDuration();
         if (!duration.HasValue)
@@ -7609,7 +7613,10 @@ internal sealed class MainForm : Form
             SetStatus("Scrub preview", Color.FromArgb(232, 181, 105));
         }
 
-        await QueueScrubPreviewFrameAsync(target);
+        if (queueInitialFrame)
+        {
+            await QueueScrubPreviewFrameAsync(target);
+        }
     }
 
     private async Task FinishScrubPreviewAsync(TimeSpan target)
@@ -7934,9 +7941,10 @@ internal sealed class MainForm : Form
         return (byte)Math.Clamp(value, 0, 255);
     }
 
-    private void EnsureScrubPreviewOutput(PlayRequest request)
+    private void EnsureScrubPreviewOutput(PlayRequest request, bool forceRetry = false, bool logFailure = true)
     {
-        if (string.Equals(_scrubPreviewOutputDisabledPath, request.InputPath, StringComparison.OrdinalIgnoreCase))
+        if (!forceRetry &&
+            string.Equals(_scrubPreviewOutputDisabledPath, request.InputPath, StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
@@ -7962,8 +7970,11 @@ internal sealed class MainForm : Form
             _scrubPreviewOutput = null;
             _scrubPreviewPath = null;
             _scrubPreviewModeCode = null;
-            _scrubPreviewOutputDisabledPath = request.InputPath;
-            AppendLog($"DeckLink scrub preview output unavailable: {ex.Message}");
+            _scrubPreviewOutputDisabledPath = forceRetry ? null : request.InputPath;
+            if (logFailure)
+            {
+                AppendLog($"DeckLink scrub preview output unavailable: {ex.Message}");
+            }
         }
     }
 
@@ -8590,6 +8601,8 @@ internal sealed class MainForm : Form
         _scrubPreviewPath = null;
         _scrubPreviewModeCode = null;
         _scrubPreviewOutputDisabledPath = null;
+        _nextReverseDeckLinkRetryAt = DateTime.MinValue;
+        _lastReverseDeckLinkFailureLogAt = DateTime.MinValue;
         _scrubPreviewMode = false;
         _scrubPreviewLoopRunning = false;
         _scrubPreviewReturnPaused = false;
@@ -9739,8 +9752,31 @@ internal sealed class MainForm : Form
             return;
         }
 
+        StopReversePlaybackSpeed();
         _reversePlaybackSpeed = speed;
         var target = GetCurrentSeekPosition();
+
+        if (!NativeFfmpegFrameDecoder.IsAvailable())
+        {
+            await StartReverseSeekTimerAsync(target, speed);
+            return;
+        }
+
+        try
+        {
+            await StartReverseCacheAsync(target, speed);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Reverse cache startup failed: {ex.Message}");
+            SetStatus("Reverse cache unavailable", Color.FromArgb(232, 181, 105));
+            await StartReverseSeekTimerAsync(target, speed);
+        }
+    }
+
+    private async Task StartReverseSeekTimerAsync(TimeSpan target, double speed)
+    {
+        _reversePlaybackSpeed = speed;
         if (!_scrubPreviewMode)
         {
             await BeginScrubPreviewAsync(target);
@@ -9751,6 +9787,288 @@ internal sealed class MainForm : Form
         _reversePlaybackSpeedTimer.Interval = GetReversePlaybackTimerInterval();
         _reversePlaybackSpeedTimer.Start();
         SetStatus($"Reverse {Math.Abs(speed).ToString("0.##", CultureInfo.InvariantCulture)}x", Color.FromArgb(232, 181, 105));
+    }
+
+    private async Task StartReverseCacheAsync(TimeSpan target, double speed)
+    {
+        var duration = GetCurrentSeekDuration();
+        if (!duration.HasValue || duration.Value <= TimeSpan.Zero)
+        {
+            SetStatus("Duration unavailable", Color.FromArgb(232, 181, 105));
+            StopReversePlaybackSpeed();
+            return;
+        }
+
+        target = ClampSeekOffset(target, duration.Value);
+        if (!_scrubPreviewMode)
+        {
+            await BeginScrubPreviewAsync(target, queueInitialFrame: false);
+        }
+
+        DisposeScrubPreviewHelper();
+        var request = BuildRequest(false, target);
+        var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
+        request = _deckLink.ApplyModeDefaults(request, selectedMode);
+        var size = ParseVideoSize(request.VideoSize)
+            ?? throw new InvalidOperationException("Choose a valid DeckLink output size before reverse playback.");
+        var previewOnly = PreviewOnlyMode;
+        if (!previewOnly)
+        {
+            _scrubPreviewOutputDisabledPath = null;
+            _nextReverseDeckLinkRetryAt = DateTime.MinValue;
+            _lastReverseDeckLinkFailureLogAt = DateTime.MinValue;
+            EnsureScrubPreviewOutput(request, forceRetry: true);
+        }
+
+        UpdateScrubPreviewClock(request, target);
+        UpdatePositionBar(duration.Value, target);
+        ResetAudioMeters();
+
+        var cancellation = new CancellationTokenSource();
+        _reversePlaybackCancellation = cancellation;
+        _reversePlaybackFrameCarry = 0d;
+        _reversePlaybackLastTickAt = null;
+        SetStatus($"Building reverse cache {Math.Abs(speed).ToString("0.##", CultureInfo.InvariantCulture)}x", Color.FromArgb(232, 181, 105));
+
+        _ = Task.Run(
+            () => RunReverseCachePlaybackAsync(
+                request,
+                size.Width,
+                size.Height,
+                duration.Value,
+                target,
+                GetFrameDuration(),
+                previewOnly,
+                cancellation),
+            cancellation.Token);
+    }
+
+    private async Task RunReverseCachePlaybackAsync(
+        PlayRequest request,
+        int width,
+        int height,
+        TimeSpan duration,
+        TimeSpan startPosition,
+        TimeSpan frameDuration,
+        bool previewOnly,
+        CancellationTokenSource cancellationSource)
+    {
+        var cancellationToken = cancellationSource.Token;
+        try
+        {
+            using var cache = new ReverseFrameCache(request.InputPath, width, height, frameDuration, Math.Abs(_reversePlaybackSpeed), AppendLog);
+            var position = ClampSeekOffset(startPosition, duration);
+            var stopwatch = Stopwatch.StartNew();
+            var frameTicks = Math.Max(1L, (long)Math.Round(Stopwatch.Frequency * frameDuration.TotalSeconds));
+            var nextFrameDueTicks = stopwatch.ElapsedTicks;
+            var sourceFrameCarry = 0d;
+
+            while (!cancellationToken.IsCancellationRequested && _reversePlaybackSpeed < 0d)
+            {
+                var cachedFrame = cache.GetFrame(position, cancellationToken);
+                position = ClampSeekOffset(cachedFrame.Position, duration);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!DisplayReverseCachedFrame(request, cachedFrame.Data, width, height, cachedFrame.Position, duration, previewOnly))
+                {
+                    break;
+                }
+
+                if (position <= TimeSpan.Zero)
+                {
+                    CompleteReversePlaybackAtStart();
+                    break;
+                }
+
+                var speed = Math.Abs(_reversePlaybackSpeed);
+                if (speed <= 0d)
+                {
+                    break;
+                }
+
+                sourceFrameCarry += speed;
+                var framesToStep = Math.Max(1, (int)Math.Floor(sourceFrameCarry));
+                sourceFrameCarry -= framesToStep;
+                var nextTicks = position.Ticks - frameDuration.Ticks * framesToStep;
+                position = nextTicks > 0 ? TimeSpan.FromTicks(nextTicks) : TimeSpan.Zero;
+
+                nextFrameDueTicks += frameTicks;
+                var delayTicks = nextFrameDueTicks - stopwatch.ElapsedTicks;
+                if (delayTicks > 0)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delayTicks / (double)Stopwatch.Frequency), cancellationToken);
+                }
+                else
+                {
+                    nextFrameDueTicks = stopwatch.ElapsedTicks;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when the user stops reverse, changes speed, or resumes forward playback.
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Reverse cache playback stopped: {ex.Message}");
+            SetStatusFromAnyThread("Reverse cache error", Color.FromArgb(229, 113, 105));
+        }
+        finally
+        {
+            if (ReferenceEquals(_reversePlaybackCancellation, cancellationSource))
+            {
+                _reversePlaybackCancellation = null;
+            }
+
+            cancellationSource.Dispose();
+        }
+    }
+
+    private bool DisplayReverseCachedFrame(
+        PlayRequest request,
+        byte[] frame,
+        int width,
+        int height,
+        TimeSpan target,
+        TimeSpan duration,
+        bool previewOnly)
+    {
+        if (IsDisposed || !IsHandleCreated)
+        {
+            return false;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                return (bool)Invoke(new Func<bool>(() => DisplayReverseCachedFrame(
+                    request,
+                    frame,
+                    width,
+                    height,
+                    target,
+                    duration,
+                    previewOnly)));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        if (!_scrubPreviewMode || _reversePlaybackSpeed >= 0d)
+        {
+            return false;
+        }
+
+        _selectedStartOffset = target;
+        _playbackStartOffset = target;
+        _playbackDuration = duration;
+        _playbackStartedAt = DateTime.UtcNow;
+        _playbackPausedAt = _playbackStartedAt;
+        _playbackPausedDuration = TimeSpan.Zero;
+        _playbackPath = request.InputPath;
+        _playbackIsStillImage = false;
+        _playbackIsTestPattern = false;
+        _isPaused = true;
+        UpdatePositionBar(duration, target);
+
+        if (!previewOnly)
+        {
+            DisplayReverseFrameToDeckLink(request, frame);
+        }
+
+        UpdateAppPreviewFrame(frame, width, height);
+        SetStatus($"Reverse cache {FormatClock(target)}", Color.FromArgb(232, 181, 105));
+        UpdateDurationLabel();
+        return true;
+    }
+
+    private void DisplayReverseFrameToDeckLink(PlayRequest request, byte[] frame)
+    {
+        if (_scrubPreviewOutput is null)
+        {
+            var now = DateTime.UtcNow;
+            if (now < _nextReverseDeckLinkRetryAt)
+            {
+                return;
+            }
+
+            _nextReverseDeckLinkRetryAt = now + ReverseDeckLinkRetryInterval;
+            _scrubPreviewOutputDisabledPath = null;
+            EnsureScrubPreviewOutput(request, forceRetry: true, logFailure: false);
+        }
+
+        try
+        {
+            _scrubPreviewOutput?.DisplayFrame(frame);
+        }
+        catch (Exception ex)
+        {
+            _scrubPreviewOutput?.Dispose();
+            _scrubPreviewOutput = null;
+            _scrubPreviewPath = null;
+            _scrubPreviewModeCode = null;
+            _scrubPreviewOutputDisabledPath = null;
+            _nextReverseDeckLinkRetryAt = DateTime.UtcNow + ReverseDeckLinkRetryInterval;
+
+            if (DateTime.UtcNow - _lastReverseDeckLinkFailureLogAt > TimeSpan.FromSeconds(2))
+            {
+                _lastReverseDeckLinkFailureLogAt = DateTime.UtcNow;
+                AppendLog($"DeckLink reverse output lost; retrying. {ex.Message}");
+            }
+        }
+    }
+
+    private void CompleteReversePlaybackAtStart()
+    {
+        if (IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(() => CompleteReversePlaybackAtStart());
+            }
+            catch
+            {
+                // The form may be closing.
+            }
+
+            return;
+        }
+
+        _selectedPlaybackSpeed = 0d;
+        StopReversePlaybackSpeed();
+        UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
+        SetStatus("Speed 0x", Color.FromArgb(232, 181, 105));
+    }
+
+    private void SetStatusFromAnyThread(string text, Color color)
+    {
+        if (IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(() => SetStatus(text, color));
+            }
+            catch
+            {
+                // The form may be closing.
+            }
+
+            return;
+        }
+
+        SetStatus(text, color);
     }
 
     private async Task ReversePlaybackSpeedTimer_TickAsync()
@@ -9810,6 +10128,9 @@ internal sealed class MainForm : Form
     private void StopReversePlaybackSpeed()
     {
         _reversePlaybackSpeedTimer.Stop();
+        var reverseCancellation = _reversePlaybackCancellation;
+        _reversePlaybackCancellation = null;
+        reverseCancellation?.Cancel();
         _reversePlaybackSpeed = 0d;
         _reversePlaybackFrameCarry = 0d;
         _reversePlaybackLastTickAt = null;
