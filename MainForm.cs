@@ -206,6 +206,7 @@ internal sealed class MainForm : Form
     private readonly Label _loadedFileLabel = new();
     private readonly Label _durationLabel = new();
     private readonly Label _currentTimeLabel = new();
+    private readonly Label _reverseCacheStatusLabel = new();
     private readonly Label _positionStartLabel = new();
     private readonly Label _positionEndLabel = new();
     private readonly SeekBarControl _positionBar = new();
@@ -217,6 +218,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _playbackPositionTimer = new() { Interval = 500 };
     private readonly System.Windows.Forms.Timer _scrubSeekTimer = new() { Interval = 140 };
     private readonly System.Windows.Forms.Timer _reversePlaybackSpeedTimer = new() { Interval = 120 };
+    private readonly System.Windows.Forms.Timer _reverseDeckLinkFrameTimer = new() { Interval = 40 };
     private readonly System.Windows.Forms.Timer _cpuUsageTimer = new() { Interval = 1000 };
 
     private TableLayoutPanel? _settingsSplit;
@@ -236,6 +238,8 @@ internal sealed class MainForm : Form
     private CancellationTokenSource? _scrubPreviewDecodeCancellation;
     private CancellationTokenSource? _reversePlaybackCancellation;
     private Task? _scrubPreviewStartTask;
+    private PlayRequest? _reverseDeckLinkRequest;
+    private byte[]? _reverseDeckLinkFrame;
     private readonly List<PlaylistItem> _playlistItems = new();
     private PlaylistItem? _playlistClipboardItem;
     private string? _currentPlaylistPath;
@@ -351,6 +355,7 @@ internal sealed class MainForm : Form
         _playbackPositionTimer.Tick += (_, _) => UpdateDurationLabel();
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
         _reversePlaybackSpeedTimer.Tick += async (_, _) => await ReversePlaybackSpeedTimer_TickAsync();
+        _reverseDeckLinkFrameTimer.Tick += (_, _) => ReverseDeckLinkFrameTimer_Tick();
         KeyDown += MainForm_KeyDown;
         InitializeCpuUsageSampling();
         _cpuUsageTimer.Tick += (_, _) => UpdateCpuUsageLabel();
@@ -375,6 +380,7 @@ internal sealed class MainForm : Form
             _durationProbeCancellation?.Cancel();
             _mediaGridMetadataCancellation?.Cancel();
             _scrubSeekTimer.Stop();
+            _reverseDeckLinkFrameTimer.Stop();
             _cpuUsageTimer.Stop();
             DisposeCpuUsageSampling();
             StopExternalFfplayProcesses();
@@ -1382,10 +1388,20 @@ internal sealed class MainForm : Form
         _durationLabel.BackColor = Color.FromArgb(30, 35, 40);
         _durationLabel.TextAlign = ContentAlignment.MiddleCenter;
         _durationLabel.Text = "--";
+        _reverseCacheStatusLabel.AutoSize = false;
+        _reverseCacheStatusLabel.Dock = DockStyle.Fill;
+        _reverseCacheStatusLabel.Margin = new Padding(0);
+        _reverseCacheStatusLabel.Padding = new Padding(4, 0, 8, 0);
+        _reverseCacheStatusLabel.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold, GraphicsUnit.Point);
+        _reverseCacheStatusLabel.ForeColor = Color.FromArgb(232, 181, 105);
+        _reverseCacheStatusLabel.BackColor = Color.FromArgb(30, 35, 40);
+        _reverseCacheStatusLabel.TextAlign = ContentAlignment.MiddleRight;
+        _reverseCacheStatusLabel.Text = string.Empty;
+        _reverseCacheStatusLabel.Visible = false;
         var previewInfoStrip = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -1393,9 +1409,11 @@ internal sealed class MainForm : Form
         };
         previewInfoStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
         previewInfoStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        previewInfoStrip.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
         previewInfoStrip.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         previewInfoStrip.Controls.Add(_durationLabel, 0, 0);
         previewInfoStrip.Controls.Add(_loadedFileLabel, 1, 0);
+        previewInfoStrip.Controls.Add(_reverseCacheStatusLabel, 2, 0);
         layout.Controls.Add(previewInfoStrip, 1, 0);
 
         ConfigurePreviewAudioMeter(_leftAudioMeter);
@@ -2454,10 +2472,16 @@ internal sealed class MainForm : Form
             return;
         }
 
-        if (ReferenceEquals(label, _durationLabel) || ReferenceEquals(label, _currentTimeLabel))
+        if (ReferenceEquals(label, _durationLabel) ||
+            ReferenceEquals(label, _currentTimeLabel) ||
+            ReferenceEquals(label, _reverseCacheStatusLabel))
         {
             label.BackColor = ThemePanelColor(dark);
-            label.ForeColor = ThemeTextColor(dark);
+            if (!ReferenceEquals(label, _reverseCacheStatusLabel))
+            {
+                label.ForeColor = ThemeTextColor(dark);
+            }
+
             return;
         }
 
@@ -8582,6 +8606,8 @@ internal sealed class MainForm : Form
     private void ExitScrubPreviewMode(bool holdForReplacement, bool setStopped)
     {
         _scrubSeekTimer.Stop();
+        StopReverseDeckLinkFramePump();
+        SetReverseCacheStatusFromAnyThread(null, Color.Empty);
         _pendingScrubPreviewOffset = null;
         _scrubPreviewDecodeCancellation?.Cancel();
         _scrubPreviewDecodeCancellation = null;
@@ -9823,6 +9849,14 @@ internal sealed class MainForm : Form
         UpdateScrubPreviewClock(request, target);
         UpdatePositionBar(duration.Value, target);
         ResetAudioMeters();
+        SetReverseCacheStatusFromAnyThread("CACHE", Color.FromArgb(232, 181, 105));
+        if (!previewOnly)
+        {
+            _reverseDeckLinkFrameTimer.Interval = GetReverseDeckLinkFrameInterval();
+            _reverseDeckLinkRequest = request;
+            _reverseDeckLinkFrame = null;
+            _reverseDeckLinkFrameTimer.Start();
+        }
 
         var cancellation = new CancellationTokenSource();
         _reversePlaybackCancellation = cancellation;
@@ -9838,6 +9872,7 @@ internal sealed class MainForm : Form
                 duration.Value,
                 target,
                 GetFrameDuration(),
+                speed,
                 previewOnly,
                 cancellation),
             cancellation.Token);
@@ -9850,13 +9885,15 @@ internal sealed class MainForm : Form
         TimeSpan duration,
         TimeSpan startPosition,
         TimeSpan frameDuration,
+        double requestedSpeed,
         bool previewOnly,
         CancellationTokenSource cancellationSource)
     {
         var cancellationToken = cancellationSource.Token;
         try
         {
-            using var cache = new ReverseFrameCache(request.InputPath, width, height, frameDuration, Math.Abs(_reversePlaybackSpeed), AppendLog);
+            var requestedSpeedMagnitude = Math.Abs(requestedSpeed);
+            using var cache = new ReverseFrameCache(request.InputPath, width, height, frameDuration, requestedSpeedMagnitude, AppendLog);
             var position = ClampSeekOffset(startPosition, duration);
             var stopwatch = Stopwatch.StartNew();
             var frameTicks = Math.Max(1L, (long)Math.Round(Stopwatch.Frequency * frameDuration.TotalSeconds));
@@ -9865,9 +9902,13 @@ internal sealed class MainForm : Form
 
             while (!cancellationToken.IsCancellationRequested && _reversePlaybackSpeed < 0d)
             {
+                var requestedPosition = position;
+                var cacheWait = Stopwatch.StartNew();
                 var cachedFrame = cache.GetFrame(position, cancellationToken);
+                cacheWait.Stop();
                 position = ClampSeekOffset(cachedFrame.Position, duration);
                 cancellationToken.ThrowIfCancellationRequested();
+                UpdateReverseCacheStatusFromAnyThread(requestedPosition, cachedFrame.Position, cacheWait.Elapsed, frameDuration, requestedSpeedMagnitude);
                 if (!DisplayReverseCachedFrame(request, cachedFrame.Data, width, height, cachedFrame.Position, duration, previewOnly))
                 {
                     break;
@@ -9919,6 +9960,7 @@ internal sealed class MainForm : Form
                 _reversePlaybackCancellation = null;
             }
 
+            SetReverseCacheStatusFromAnyThread(null, Color.Empty);
             cancellationSource.Dispose();
         }
     }
@@ -9975,13 +10017,102 @@ internal sealed class MainForm : Form
 
         if (!previewOnly)
         {
-            DisplayReverseFrameToDeckLink(request, frame);
+            SetReverseDeckLinkFrame(request, frame);
         }
 
         UpdateAppPreviewFrame(frame, width, height);
         SetStatus($"Reverse cache {FormatClock(target)}", Color.FromArgb(232, 181, 105));
         UpdateDurationLabel();
         return true;
+    }
+
+    private void UpdateReverseCacheStatusFromAnyThread(
+        TimeSpan requestedPosition,
+        TimeSpan deliveredPosition,
+        TimeSpan waitTime,
+        TimeSpan frameDuration,
+        double speed)
+    {
+        if (speed < 5d)
+        {
+            SetReverseCacheStatusFromAnyThread(null, Color.Empty);
+            return;
+        }
+
+        var jumpTolerance = TimeSpan.FromTicks(Math.Max(frameDuration.Ticks * 3, TimeSpan.FromMilliseconds(120).Ticks));
+        if (requestedPosition - deliveredPosition > jumpTolerance)
+        {
+            SetReverseCacheStatusFromAnyThread("SKIP", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        if (waitTime > TimeSpan.FromMilliseconds(120))
+        {
+            SetReverseCacheStatusFromAnyThread("CACHE", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        SetReverseCacheStatusFromAnyThread(null, Color.Empty);
+    }
+
+    private void SetReverseCacheStatusFromAnyThread(string? text, Color color)
+    {
+        if (IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(() => SetReverseCacheStatusFromAnyThread(text, color));
+            }
+            catch
+            {
+                // The form may be closing while a cache worker is stopping.
+            }
+
+            return;
+        }
+
+        _reverseCacheStatusLabel.Text = text ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(text) && color != Color.Empty)
+        {
+            _reverseCacheStatusLabel.ForeColor = color;
+        }
+
+        _reverseCacheStatusLabel.Visible = !string.IsNullOrWhiteSpace(text);
+    }
+
+    private void SetReverseDeckLinkFrame(PlayRequest request, byte[] frame)
+    {
+        _reverseDeckLinkRequest = request;
+        _reverseDeckLinkFrame = frame;
+        if (!_reverseDeckLinkFrameTimer.Enabled)
+        {
+            _reverseDeckLinkFrameTimer.Interval = GetReverseDeckLinkFrameInterval();
+            _reverseDeckLinkFrameTimer.Start();
+        }
+
+        DisplayReverseFrameToDeckLink(request, frame);
+    }
+
+    private void ReverseDeckLinkFrameTimer_Tick()
+    {
+        if (!_scrubPreviewMode || _reverseDeckLinkRequest is null || _reverseDeckLinkFrame is null)
+        {
+            return;
+        }
+
+        DisplayReverseFrameToDeckLink(_reverseDeckLinkRequest, _reverseDeckLinkFrame);
+    }
+
+    private void StopReverseDeckLinkFramePump()
+    {
+        _reverseDeckLinkFrameTimer.Stop();
+        _reverseDeckLinkRequest = null;
+        _reverseDeckLinkFrame = null;
     }
 
     private void DisplayReverseFrameToDeckLink(PlayRequest request, byte[] frame)
@@ -10134,6 +10265,7 @@ internal sealed class MainForm : Form
         _reversePlaybackSpeed = 0d;
         _reversePlaybackFrameCarry = 0d;
         _reversePlaybackLastTickAt = null;
+        SetReverseCacheStatusFromAnyThread(null, Color.Empty);
     }
 
     private int GetReversePlaybackTimerInterval()
@@ -10145,6 +10277,17 @@ internal sealed class MainForm : Form
         }
 
         return Math.Clamp((int)Math.Round(frameMilliseconds), 10, 1000);
+    }
+
+    private int GetReverseDeckLinkFrameInterval()
+    {
+        var frameMilliseconds = GetFrameDuration().TotalMilliseconds;
+        if (double.IsNaN(frameMilliseconds) || double.IsInfinity(frameMilliseconds) || frameMilliseconds <= 0d)
+        {
+            frameMilliseconds = 40d;
+        }
+
+        return Math.Clamp((int)Math.Round(frameMilliseconds * 4d), 80, 250);
     }
 
     private int GetReversePlaybackFrameStep(TimeSpan frameDuration)

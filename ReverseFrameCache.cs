@@ -4,8 +4,10 @@ internal sealed class ReverseFrameCache : IDisposable
 {
     private const int MaxCacheFrames = 90;
     private const int MinCacheFrames = 8;
-    private const int MaxParallelPrefetchBlocks = 6;
+    private const int MaxParallelPrefetchBlocks = 3;
     private const long MaxTotalCacheBytes = 1024L * 1024 * 1024;
+    private static readonly TimeSpan PrefetchSwitchWait = TimeSpan.FromMilliseconds(80);
+    private static readonly TimeSpan BlockBoundaryTolerance = TimeSpan.FromMilliseconds(2);
 
     private readonly NativeFfmpegFrameDecoder _decoder;
     private readonly string _inputPath;
@@ -19,6 +21,7 @@ internal sealed class ReverseFrameCache : IDisposable
     private readonly object _prefetchGate = new();
     private readonly List<ReverseFrameBlock> _prefetchedBlocks = [];
     private readonly List<PrefetchJob> _prefetchJobs = [];
+    private readonly bool _fastReverseDecode;
     private ReverseFrameBlock? _currentBlock;
     private bool _disposed;
 
@@ -38,8 +41,9 @@ internal sealed class ReverseFrameCache : IDisposable
         _inputPath = inputPath;
         _width = width;
         _height = height;
-        _decoder = new NativeFfmpegFrameDecoder(inputPath, width, height);
         _cacheFrameStep = GetCacheFrameStep(playbackSpeed);
+        _fastReverseDecode = _cacheFrameStep >= 10;
+        _decoder = new NativeFfmpegFrameDecoder(inputPath, width, height, _fastReverseDecode);
         _cacheFrameInterval = TimeSpan.FromTicks(frameDuration.Ticks * _cacheFrameStep);
         _prefetchBlockTarget = GetPrefetchBlockTarget(_cacheFrameStep);
         _logLine = logLine;
@@ -48,7 +52,7 @@ internal sealed class ReverseFrameCache : IDisposable
         var activeBlockCount = 1 + _prefetchBlockTarget;
         var maxBlockBytes = Math.Max(frameBytes * MinCacheFrames, MaxTotalCacheBytes / activeBlockCount);
         var memoryLimitedFrames = (int)Math.Max(MinCacheFrames, Math.Min(MaxCacheFrames, maxBlockBytes / frameBytes));
-        _cacheFrameCount = Math.Clamp(memoryLimitedFrames, MinCacheFrames, MaxCacheFrames);
+        _cacheFrameCount = Math.Clamp(Math.Min(memoryLimitedFrames, GetMaxFramesForSpeed(_cacheFrameStep)), MinCacheFrames, MaxCacheFrames);
     }
 
     public DecodedVideoFrame GetFrame(TimeSpan target, CancellationToken cancellationToken)
@@ -95,6 +99,13 @@ internal sealed class ReverseFrameCache : IDisposable
                 return true;
             }
 
+            if (_cacheFrameStep >= 10 && TryTakeAnyUsefulPrefetchedBlockUnderLock(target, out block))
+            {
+                _currentBlock = block;
+                _logLine?.Invoke($"Reverse cache jumped to ready block {FormatClock(block.Start)} to {FormatClock(block.End)}.");
+                return true;
+            }
+
             jobToWait = _prefetchJobs.FirstOrDefault(job => TargetCouldUseBlockEndingAt(target, job.BlockEnd));
         }
 
@@ -105,7 +116,29 @@ internal sealed class ReverseFrameCache : IDisposable
 
         try
         {
-            jobToWait.Task.Wait(cancellationToken);
+            if (!jobToWait.Task.Wait(PrefetchSwitchWait, cancellationToken))
+            {
+                lock (_prefetchGate)
+                {
+                    HarvestCompletedPrefetchUnderLock();
+                    if (_cacheFrameStep >= 10 && TryTakeOlderPrefetchedBlockUnderLock(target, out var lateBlock))
+                    {
+                        _currentBlock = lateBlock;
+                        _logLine?.Invoke($"Reverse cache caught late ready block {FormatClock(lateBlock.Start)} to {FormatClock(lateBlock.End)}.");
+                        return true;
+                    }
+
+                    if (_cacheFrameStep >= 10 && TryTakeAnyUsefulPrefetchedBlockUnderLock(target, out lateBlock))
+                    {
+                        _currentBlock = lateBlock;
+                        _logLine?.Invoke($"Reverse cache jumped to ready block {FormatClock(lateBlock.Start)} to {FormatClock(lateBlock.End)}.");
+                        return true;
+                    }
+                }
+
+                _logLine?.Invoke("Reverse cache prefetch not ready; decoding next block inline.");
+                return false;
+            }
         }
         catch (OperationCanceledException)
         {
@@ -127,6 +160,13 @@ internal sealed class ReverseFrameCache : IDisposable
                 {
                     _currentBlock = block;
                     _logLine?.Invoke($"Reverse cache skipped to ready block {FormatClock(block.Start)} to {FormatClock(block.End)}.");
+                    return true;
+                }
+
+                if (_cacheFrameStep >= 10 && TryTakeAnyUsefulPrefetchedBlockUnderLock(target, out block))
+                {
+                    _currentBlock = block;
+                    _logLine?.Invoke($"Reverse cache jumped to ready block {FormatClock(block.Start)} to {FormatClock(block.End)}.");
                     return true;
                 }
 
@@ -167,6 +207,20 @@ internal sealed class ReverseFrameCache : IDisposable
         return true;
     }
 
+    private bool TryTakeAnyUsefulPrefetchedBlockUnderLock(TimeSpan target, out ReverseFrameBlock block)
+    {
+        var index = _prefetchedBlocks.FindIndex(candidate => candidate.Start < target);
+        if (index < 0)
+        {
+            block = null!;
+            return false;
+        }
+
+        block = _prefetchedBlocks[index];
+        _prefetchedBlocks.RemoveRange(0, index + 1);
+        return true;
+    }
+
     private void StartPrefetchPreviousBlocks()
     {
         if (_currentBlock is null || _currentBlock.Start <= TimeSpan.Zero)
@@ -195,7 +249,7 @@ internal sealed class ReverseFrameCache : IDisposable
                 var task = Task.Run(
                     () =>
                     {
-                        using var decoder = new NativeFfmpegFrameDecoder(_inputPath, _width, _height);
+                        using var decoder = new NativeFfmpegFrameDecoder(_inputPath, _width, _height, _fastReverseDecode);
                         return DecodeBlockEndingAt(decoder, prefetchEnd, cancellationToken);
                     },
                     cancellationToken);
@@ -285,7 +339,7 @@ internal sealed class ReverseFrameCache : IDisposable
     private bool TargetCouldUseBlockEndingAt(TimeSpan target, TimeSpan blockEnd)
     {
         var expectedStart = GetBlockStartForEnd(blockEnd);
-        return target >= expectedStart - _cacheFrameInterval && target <= blockEnd + _cacheFrameInterval;
+        return target >= expectedStart - BlockBoundaryTolerance && target <= blockEnd + BlockBoundaryTolerance;
     }
 
     private ReverseFrameBlock DecodeBlockEndingAt(
@@ -332,6 +386,26 @@ internal sealed class ReverseFrameCache : IDisposable
         }
 
         return cacheFrameStep > 1 ? 2 : 1;
+    }
+
+    private static int GetMaxFramesForSpeed(int cacheFrameStep)
+    {
+        if (cacheFrameStep >= 20)
+        {
+            return 18;
+        }
+
+        if (cacheFrameStep >= 10)
+        {
+            return 24;
+        }
+
+        if (cacheFrameStep >= 5)
+        {
+            return 40;
+        }
+
+        return MaxCacheFrames;
     }
 
     private void ClearPrefetch()
@@ -399,7 +473,7 @@ internal sealed class ReverseFrameCache : IDisposable
 
         public bool Contains(TimeSpan target, TimeSpan frameInterval)
         {
-            return target >= Start - frameInterval && target <= End + frameInterval;
+            return target >= Start - BlockBoundaryTolerance && target <= End + BlockBoundaryTolerance;
         }
 
         public DecodedVideoFrame GetNearestFrame(TimeSpan target, TimeSpan frameInterval)

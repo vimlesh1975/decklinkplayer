@@ -17,10 +17,12 @@ internal sealed unsafe class NativeFfmpegFrameDecoder : IDisposable
     private int _videoStreamIndex = -1;
     private int _outputWidth;
     private int _outputHeight;
+    private readonly bool _fastReverseDecode;
     private bool _disposed;
 
-    public NativeFfmpegFrameDecoder(string path, int outputWidth, int outputHeight)
+    public NativeFfmpegFrameDecoder(string path, int outputWidth, int outputHeight, bool fastReverseDecode = false)
     {
+        _fastReverseDecode = fastReverseDecode;
         InitializeNativeLibraries();
         Open(path, outputWidth, outputHeight);
     }
@@ -229,6 +231,13 @@ internal sealed unsafe class NativeFfmpegFrameDecoder : IDisposable
         }
 
         ThrowIfError(ffmpeg.avcodec_parameters_to_context(_codecContext, codecParameters), "copy codec parameters");
+        _codecContext->thread_count = Math.Clamp(Environment.ProcessorCount / 2, 1, 8);
+        _codecContext->thread_type = ffmpeg.FF_THREAD_FRAME | ffmpeg.FF_THREAD_SLICE;
+        if (_fastReverseDecode)
+        {
+            _codecContext->skip_frame = AVDiscard.AVDISCARD_NONREF;
+        }
+
         ThrowIfError(ffmpeg.avcodec_open2(_codecContext, codec, null), "open video decoder");
 
         _packet = ffmpeg.av_packet_alloc();
