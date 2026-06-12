@@ -9860,11 +9860,11 @@ internal sealed class MainForm : Form
         DisposeReverseAudio();
         var frameDuration = GetFrameDuration();
         var reverseAudioSpeed = Math.Abs(speed);
-        var reverseAudioEnabled = !request.NoAudio && reverseAudioSpeed <= 10.001d;
+        var reverseAudioEnabled = !request.NoAudio && reverseAudioSpeed <= 20.001d;
         if (reverseAudioEnabled)
         {
             _reverseAudio = new ReverseAudioChunkQueue(request, reverseAudioSpeed, target, AppendLog);
-            if (!previewOnly && reverseAudioSpeed <= 10.001d && _scrubPreviewOutput is not null)
+            if (!previewOnly && reverseAudioSpeed <= 20.001d && _scrubPreviewOutput is not null)
             {
                 try
                 {
@@ -9886,9 +9886,9 @@ internal sealed class MainForm : Form
                     AppendLog($"Reverse DeckLink audio unavailable: {ex.Message}");
                 }
             }
-            else if (!previewOnly && reverseAudioSpeed > 10.001d)
+            else if (!previewOnly && reverseAudioSpeed > 20.001d)
             {
-                AppendLog("Reverse DeckLink audio muted above -10x for stability.");
+                AppendLog("Reverse DeckLink audio muted above -20x for stability.");
             }
 
             if (previewOnly || PcAudioMode)
@@ -9906,7 +9906,7 @@ internal sealed class MainForm : Form
         }
         else if (!request.NoAudio)
         {
-            AppendLog("Reverse audio muted above -10x to keep high-speed shuttle responsive.");
+            AppendLog("Reverse audio muted above -20x to keep high-speed shuttle responsive.");
         }
         if (!previewOnly)
         {
