@@ -1,4 +1,5 @@
 # DecklinkPlayer
+![alt text](image.png)
 
 DecklinkPlayer is a Windows desktop playout tool for Blackmagic DeckLink cards. It is built for quick studio use: browse a media library, preview inside the app, seek, pause, shuttle, play playlists, and output SDI through the Blackmagic DeckLink SDK.
 
