@@ -12,8 +12,6 @@ internal sealed class DeckLinkSdkPlayer
     private const int AudioSampleRate = 48000;
     private const int AudioBytesPerSample = 4;
     private const int AudioChunkSampleFrames = AudioSampleRate / 100;
-    private const int MaxBufferedAudioSampleFrames = AudioSampleRate / 10;
-    private const int AudioBufferPollDelayMs = 2;
     private const int AudioWriteZeroRetryDelayMs = 2;
     private const int AudioWriteStallLogMilliseconds = 500;
     private static readonly object HeldVideoOutputGate = new();
@@ -115,7 +113,6 @@ internal sealed class DeckLinkSdkPlayer
         Task? audioPumpTask = null;
         Task? pcAudioMonitorStderrTask = null;
         ProcessPauseBinding? pcAudioPauseBinding = null;
-        var firstVideoFrameDisplayed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var audioOutputEnabled = false;
 
         var killedByCancellation = false;
@@ -123,7 +120,6 @@ internal sealed class DeckLinkSdkPlayer
         using var cancellationRegistration = cancellationToken.Register(() =>
         {
             killedByCancellation = true;
-            firstVideoFrameDisplayed.TrySetResult();
             TryKill(videoDecoder);
             TryKill(audioDecoder);
             TryKill(pcAudioMonitor);
@@ -155,7 +151,7 @@ internal sealed class DeckLinkSdkPlayer
                     () => PumpErrorAsync(audioDecoder, "audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
                 audioPumpTask = Task.Run(
-                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, request.AudioSyncMilliseconds, firstVideoFrameDisplayed.Task, logLine, audioMeter, cancellationToken),
+                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, cancellationToken),
                     cancellationToken);
                 if (monitorPcAudio)
                 {
@@ -176,8 +172,7 @@ internal sealed class DeckLinkSdkPlayer
 
             var frameNumber = 0L;
             var stopwatch = Stopwatch.StartNew();
-            var frameTicks = Stopwatch.Frequency * frameDuration / timeScale;
-            var nextFrameDueTicks = stopwatch.ElapsedTicks;
+            var frameTicks = Math.Max(1L, Stopwatch.Frequency * frameDuration / Math.Max(1L, timeScale));
             var sourceFrameCarry = 0d;
             var renderedInitialPausedFrame = false;
 
@@ -191,9 +186,9 @@ internal sealed class DeckLinkSdkPlayer
 
                 if (pauseController?.IsPaused == true && !shouldRenderInitialPausedFrame)
                 {
-                    var pauseStartedTicks = stopwatch.ElapsedTicks;
+                    stopwatch.Stop();
                     await pauseController.WaitIfPausedAsync(cancellationToken);
-                    nextFrameDueTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
+                    stopwatch.Start();
                 }
 
                 var speed = GetForwardPlaybackSpeed(pauseController);
@@ -233,10 +228,6 @@ internal sealed class DeckLinkSdkPlayer
                         output.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
                     }
 
-                    if (frameNumber == 0)
-                    {
-                        firstVideoFrameDisplayed.TrySetResult();
-                    }
                 }
                 finally
                 {
@@ -257,19 +248,13 @@ internal sealed class DeckLinkSdkPlayer
                     renderedInitialPausedFrame = true;
                 }
 
-                if (frameNumber % 25 == 0)
+                if (frameNumber % 100 == 0)
                 {
                     logLine?.Invoke($"sdk_frame={frameNumber}");
                 }
 
-                nextFrameDueTicks += frameTicks;
-                var remainingTicks = nextFrameDueTicks - stopwatch.ElapsedTicks;
-                if (remainingTicks < -Stopwatch.Frequency)
-                {
-                    nextFrameDueTicks = stopwatch.ElapsedTicks;
-                    remainingTicks = 0;
-                }
-
+                var targetTicks = frameNumber * frameTicks;
+                var remainingTicks = targetTicks - stopwatch.ElapsedTicks;
                 if (remainingTicks > 0)
                 {
                     var delayMs = (int)Math.Min(remainingTicks * 1000 / Stopwatch.Frequency, 100);
@@ -280,7 +265,6 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
-            firstVideoFrameDisplayed.TrySetResult();
             pcAudioPauseBinding?.Dispose();
             pcAudioPauseBinding = null;
             TryKill(videoDecoder);
@@ -312,7 +296,6 @@ internal sealed class DeckLinkSdkPlayer
         }
         finally
         {
-            firstVideoFrameDisplayed.TrySetResult();
             pcAudioPauseBinding?.Dispose();
             TryKill(videoDecoder);
             videoDecoder.Dispose();
@@ -900,6 +883,8 @@ internal sealed class DeckLinkSdkPlayer
         }
 
         audioFilters.Add("aresample=async=1000:first_pts=0");
+        audioFilters.Add("aformat=sample_fmts=s32");
+        audioFilters.Add("asetpts=N/SR/TB");
         args.Add("-af");
         args.Add(string.Join(",", audioFilters));
         args.Add("-ac");
@@ -1012,9 +997,9 @@ internal sealed class DeckLinkSdkPlayer
 
         return string.Join(
             ";",
-            $"[0:v]setpts=PTS-STARTPTS,fps={rate},{scaleFilter},format=yuv420p[v0]",
-            $"[1:v]setpts=PTS-STARTPTS,fps={rate},{scaleFilter},format=yuv420p[v1]",
-            $"[v0][v1]xfade=transition={transition}:duration={duration}:offset={offset},format=uyvy422[vout]");
+            $"[0:v]setpts=PTS-STARTPTS,fps={rate}:start_time=0,setpts=N/({rate}*TB),{scaleFilter},format=yuv420p[v0]",
+            $"[1:v]setpts=PTS-STARTPTS,fps={rate}:start_time=0,setpts=N/({rate}*TB),{scaleFilter},format=yuv420p[v1]",
+            $"[v0][v1]xfade=transition={transition}:duration={duration}:offset={offset},fps={rate}:start_time=0,setpts=N/({rate}*TB),format=uyvy422[vout]");
     }
 
     private static string BuildTransitionAudioFilter(PlaylistTransitionSegment segment)
@@ -1024,7 +1009,7 @@ internal sealed class DeckLinkSdkPlayer
             ";",
             "[0:a]asetpts=PTS-STARTPTS,aresample=async=1000:first_pts=0[a0]",
             "[1:a]asetpts=PTS-STARTPTS,aresample=async=1000:first_pts=0[a1]",
-            $"[a0][a1]acrossfade=d={duration}:c1=tri:c2=tri,aresample=async=1000:first_pts=0[aout]");
+            $"[a0][a1]acrossfade=d={duration}:c1=tri:c2=tri,aresample=async=1000:first_pts=0,aformat=sample_fmts=s32,asetpts=N/SR/TB[aout]");
     }
 
     private static string BuildScaleFilter(string? videoSize)
@@ -1070,21 +1055,19 @@ internal sealed class DeckLinkSdkPlayer
 
     private static string BuildVideoFilter(PlayRequest request)
     {
+        var rate = NormalizeRateString(request.FrameRate);
         var filters = new List<string>
         {
             "setpts=PTS-STARTPTS",
         };
-
-        if (!string.IsNullOrWhiteSpace(request.FrameRate))
-        {
-            filters.Add($"fps={NormalizeRateString(request.FrameRate)}:start_time=0");
-        }
 
         if (!string.IsNullOrWhiteSpace(request.VideoFilter))
         {
             filters.Add(request.VideoFilter);
         }
 
+        filters.Add($"fps={rate}:start_time=0");
+        filters.Add($"setpts=N/({rate}*TB)");
         filters.Add("format=uyvy422");
         return string.Join(",", filters);
     }
@@ -1217,8 +1200,6 @@ internal sealed class DeckLinkSdkPlayer
         Process audioDecoder,
         int channels,
         PlaybackPauseController? pauseController,
-        int initialAudioSyncMilliseconds,
-        Task firstVideoFrameDisplayed,
         Action<string>? logLine,
         Action<double, double>? audioMeter,
         CancellationToken cancellationToken)
@@ -1227,19 +1208,15 @@ internal sealed class DeckLinkSdkPlayer
         var bufferBytes = checked(AudioChunkSampleFrames * bytesPerSampleFrame);
         var managedBuffer = new byte[bufferBytes];
         var sourceSpeedBuffer = managedBuffer;
-        var silenceBuffer = new byte[bufferBytes];
         var unmanagedBuffer = Marshal.AllocHGlobal(bufferBytes);
         var totalWritten = 0L;
         var meterPeakLeft = 0L;
         var meterPeakRight = 0L;
         var meterSampleFrames = 0;
         var sourceSampleFrameCarry = 0d;
-        var audioSyncState = new AudioSyncState();
 
         try
         {
-            await firstVideoFrameDisplayed.WaitAsync(cancellationToken);
-
             while (!cancellationToken.IsCancellationRequested)
             {
                 if (pauseController is not null)
@@ -1267,25 +1244,6 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 var sampleFrameCount = bytesRead / bytesPerSampleFrame;
-                bytesRead = await ApplyLiveAudioSyncAsync(
-                    output,
-                    outputLock,
-                    managedBuffer,
-                    bytesRead,
-                    bytesPerSampleFrame,
-                    silenceBuffer,
-                    unmanagedBuffer,
-                    pauseController,
-                    initialAudioSyncMilliseconds,
-                    audioSyncState,
-                    logLine,
-                    cancellationToken);
-                if (bytesRead <= 0)
-                {
-                    continue;
-                }
-
-                sampleFrameCount = bytesRead / bytesPerSampleFrame;
                 if (audioMeter is not null)
                 {
                     AccumulateMeterPeaks(
@@ -1306,7 +1264,6 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 Marshal.Copy(managedBuffer, 0, unmanagedBuffer, bytesRead);
-                await WaitForAudioBufferRoomAsync(output, outputLock, sampleFrameCount, cancellationToken);
 
                 var written = await WriteAudioSamplesFullyAsync(
                     output,
@@ -1452,128 +1409,6 @@ internal sealed class DeckLinkSdkPlayer
         return totalWritten;
     }
 
-    private static async Task<int> ApplyLiveAudioSyncAsync(
-        IDeckLinkOutput_v14_2_1 output,
-        object outputLock,
-        byte[] buffer,
-        int bytesRead,
-        int bytesPerSampleFrame,
-        byte[] silenceBuffer,
-        IntPtr unmanagedBuffer,
-        PlaybackPauseController? pauseController,
-        int initialAudioSyncMilliseconds,
-        AudioSyncState state,
-        Action<string>? logLine,
-        CancellationToken cancellationToken)
-    {
-        var targetSampleFrames = GetAudioSyncSampleFrames(pauseController, initialAudioSyncMilliseconds);
-        var deltaSampleFrames = targetSampleFrames - state.AppliedSampleFrames;
-        if (deltaSampleFrames > 0)
-        {
-            await WriteSilenceSampleFramesAsync(
-                output,
-                outputLock,
-                silenceBuffer,
-                unmanagedBuffer,
-                deltaSampleFrames,
-                bytesPerSampleFrame,
-                logLine,
-                cancellationToken);
-            state.AppliedSampleFrames += deltaSampleFrames;
-            return bytesRead;
-        }
-
-        if (deltaSampleFrames >= 0)
-        {
-            return bytesRead;
-        }
-
-        var sampleFrames = bytesRead / bytesPerSampleFrame;
-        var sampleFramesToDrop = Math.Min(sampleFrames, -deltaSampleFrames);
-        if (sampleFramesToDrop <= 0)
-        {
-            return bytesRead;
-        }
-
-        var bytesToDrop = sampleFramesToDrop * bytesPerSampleFrame;
-        var remainingBytes = bytesRead - bytesToDrop;
-        if (remainingBytes > 0)
-        {
-            Buffer.BlockCopy(buffer, bytesToDrop, buffer, 0, remainingBytes);
-        }
-
-        state.AppliedSampleFrames -= sampleFramesToDrop;
-        return remainingBytes;
-    }
-
-    private static async Task WriteSilenceSampleFramesAsync(
-        IDeckLinkOutput_v14_2_1 output,
-        object outputLock,
-        byte[] silenceBuffer,
-        IntPtr unmanagedBuffer,
-        int sampleFramesToWrite,
-        int bytesPerSampleFrame,
-        Action<string>? logLine,
-        CancellationToken cancellationToken)
-    {
-        var maxChunkSampleFrames = Math.Max(1, silenceBuffer.Length / bytesPerSampleFrame);
-        var remainingSampleFrames = sampleFramesToWrite;
-        while (remainingSampleFrames > 0)
-        {
-            var chunkSampleFrames = Math.Min(remainingSampleFrames, maxChunkSampleFrames);
-            var chunkBytes = chunkSampleFrames * bytesPerSampleFrame;
-            Marshal.Copy(silenceBuffer, 0, unmanagedBuffer, chunkBytes);
-            await WaitForAudioBufferRoomAsync(output, outputLock, chunkSampleFrames, cancellationToken);
-            await WriteAudioSamplesFullyAsync(
-                output,
-                outputLock,
-                unmanagedBuffer,
-                chunkSampleFrames,
-                bytesPerSampleFrame,
-                logLine,
-                cancellationToken);
-            remainingSampleFrames -= chunkSampleFrames;
-        }
-    }
-
-    private static int GetAudioSyncSampleFrames(PlaybackPauseController? pauseController, int initialAudioSyncMilliseconds)
-    {
-        var audioSyncMilliseconds = pauseController?.AudioSyncMilliseconds ?? initialAudioSyncMilliseconds;
-        audioSyncMilliseconds = Math.Clamp(audioSyncMilliseconds, -2000, 2000);
-        return (int)Math.Round(AudioSampleRate * audioSyncMilliseconds / 1000d);
-    }
-
-    private static async Task WaitForAudioBufferRoomAsync(
-        IDeckLinkOutput_v14_2_1 output,
-        object outputLock,
-        int nextSampleFrameCount,
-        CancellationToken cancellationToken)
-    {
-        var maxBufferedSampleFrames = Math.Max(MaxBufferedAudioSampleFrames, nextSampleFrameCount * 2);
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            uint bufferedSampleFrames;
-            try
-            {
-                lock (outputLock)
-                {
-                    output.GetBufferedAudioSampleFrameCount(out bufferedSampleFrames);
-                }
-            }
-            catch
-            {
-                return;
-            }
-
-            if (bufferedSampleFrames + nextSampleFrameCount <= maxBufferedSampleFrames)
-            {
-                return;
-            }
-
-            await Task.Delay(AudioBufferPollDelayMs, cancellationToken);
-        }
-    }
-
     private static void AccumulateMeterPeaks(
         byte[] buffer,
         int sampleFrameCount,
@@ -1692,11 +1527,6 @@ internal sealed class DeckLinkSdkPlayer
         int BytesRead,
         byte[] SourceBuffer,
         double SourceSampleFrameCarry);
-
-    private sealed class AudioSyncState
-    {
-        public int AppliedSampleFrames { get; set; }
-    }
 
     private static async Task IgnoreCancellationAsync(Task? task)
     {

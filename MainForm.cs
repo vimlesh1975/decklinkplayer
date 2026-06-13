@@ -14,6 +14,9 @@ internal sealed class MainForm : Form
     private const string DefaultMediaRootPath = @"C:\casparcg\_media";
     private const string DefaultDeckLinkDeviceName = "DeckLink SDI 4K";
     private const string DefaultDeckLinkModeCode = "Hi50";
+    private const string FixedDeckLinkVideoSize = "1920x1080";
+    private const string FixedDeckLinkFrameRate = "25";
+    private const string FixedDeckLinkFieldOrder = "upper";
     private const string SettingsFolderName = "DeckLinkPlayer";
     private const string SettingsFileName = "settings.txt";
     private const string PlaylistStatusReady = "READY";
@@ -60,8 +63,6 @@ internal sealed class MainForm : Form
     private const int SeekGroupWidth = AppPreviewPanelWidth;
     private const int SeekPositiveGroupGap = 8;
     private const int TransportSpanWidth = PreviewColumnWidth;
-    private const int AudioSyncSliderStepMilliseconds = 5;
-    private const int AudioSyncRangeMilliseconds = 1000;
     private int MainAreaHeight => Math.Max(640, ClientSize.Height - RootPadding * 2 - HeaderRowHeight - SettingsAreaVerticalPadding);
     private int SourcePanelHeight => MainAreaHeight;
     private int DetailsPanelHeight => Math.Max(0, MainAreaHeight - AppPreviewAreaHeight - ActionRowHeight - ToggleRowHeight);
@@ -153,17 +154,6 @@ internal sealed class MainForm : Form
     private readonly Button _startPlaylistButton = new();
     private readonly Button _stopPlaylistButton = new();
     private readonly ComboBox _deviceBox = new();
-    private readonly ComboBox _modeBox = new();
-    private readonly TextBox _videoSizeBox = new();
-    private readonly TextBox _frameRateBox = new();
-    private readonly TextBox _pixelFormatBox = new();
-    private readonly NumericUpDown _audioChannelsBox = new();
-    private readonly TrackBar _audioSyncSlider = new();
-    private readonly Label _audioSyncValueLabel = new();
-    private readonly NumericUpDown _prerollBox = new();
-    private readonly ComboBox _duplexBox = new();
-    private readonly ComboBox _linkBox = new();
-    private readonly ComboBox _levelABox = new();
     private readonly Button _stopButton = new();
     private readonly Button _pauseResumeButton = new();
     private readonly Button _refreshMediaButton = new ToolbarTextButton();
@@ -177,7 +167,6 @@ internal sealed class MainForm : Form
     private readonly CheckBox _previewOnlyCheckBox = new();
     private readonly CheckBox _pcAudioCheckBox = new();
     private readonly Button _refreshDevicesButton = new();
-    private readonly Button _refreshModesButton = new();
     private readonly Button _seekBackOneSecondButton = new();
     private readonly Button _seekBackTenFramesButton = new();
     private readonly Button _seekBackFiveFramesButton = new();
@@ -275,7 +264,6 @@ internal sealed class MainForm : Form
     private string? _selectedDurationPath;
     private string? _playbackPath;
     private string? _savedDeviceName;
-    private string? _savedModeCode;
     private string? _nativeSeekPath;
     private string? _nativeSeekModeCode;
     private string? _nativeSeekDisabledPath;
@@ -352,12 +340,6 @@ internal sealed class MainForm : Form
         BuildUi();
         ConfigureButtonToolTips();
 
-        _pixelFormatBox.Text = FfmpegDeckLink.DefaultPixelFormat;
-        _audioChannelsBox.Value = FfmpegDeckLink.DefaultAudioChannels;
-        _prerollBox.Value = (decimal)FfmpegDeckLink.DefaultPrerollSeconds;
-        _duplexBox.SelectedItem = "unset";
-        _linkBox.SelectedItem = "single";
-        _levelABox.SelectedItem = "true";
         LoadAppSettings();
         _inputPathBox.Text = FindDefaultMediaPath();
         UpdateLoadedFileLabel();
@@ -472,24 +454,12 @@ internal sealed class MainForm : Form
         {
             var settings = ReadAppSettings();
             _savedDeviceName = GetSetting(settings, "DeckLinkDevice");
-            _savedModeCode = GetSetting(settings, "DeckLinkModeCode");
             var mediaRootPath = GetSetting(settings, "MediaRootPath");
             if (mediaRootPath is not null)
             {
                 _mediaRootPath = mediaRootPath;
                 _mediaRootPathBox.Text = mediaRootPath;
             }
-
-            SetTextSetting(_videoSizeBox, settings, "VideoSize");
-            SetTextSetting(_frameRateBox, settings, "FrameRate");
-            SetTextSetting(_pixelFormatBox, settings, "PixelFormat");
-            SetNumericSetting(_audioChannelsBox, settings, "AudioChannels");
-            SetTrackBarSetting(_audioSyncSlider, settings, "AudioSyncMs", AudioSyncSliderStepMilliseconds);
-            UpdateAudioSyncSliderLabel();
-            SetNumericSetting(_prerollBox, settings, "PrerollSeconds");
-            SelectComboValue(_duplexBox, GetSetting(settings, "Duplex"));
-            SelectComboValue(_linkBox, GetSetting(settings, "Link"));
-            SelectComboValue(_levelABox, GetSetting(settings, "LevelA"));
 
             _previewOnlyUserSet = TryGetBoolSetting(settings, "PreviewOnlyUserSet", out var previewOnlyUserSet) && previewOnlyUserSet;
             if (_previewOnlyUserSet && TryGetBoolSetting(settings, "PreviewOnly", out var previewOnly))
@@ -526,11 +496,6 @@ internal sealed class MainForm : Form
                 _savedDeviceName = _deviceBox.SelectedItem.ToString();
             }
 
-            if (_modeBox.SelectedItem is DeckLinkMode selectedMode)
-            {
-                _savedModeCode = selectedMode.Code;
-            }
-
             var settingsPath = GetSettingsFilePath();
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
 
@@ -538,17 +503,7 @@ internal sealed class MainForm : Form
                 settingsPath,
                 [
                     $"DeckLinkDevice={_savedDeviceName ?? string.Empty}",
-                    $"DeckLinkModeCode={_savedModeCode ?? string.Empty}",
                     $"MediaRootPath={_mediaRootPath}",
-                    $"VideoSize={_videoSizeBox.Text.Trim()}",
-                    $"FrameRate={_frameRateBox.Text.Trim()}",
-                    $"PixelFormat={_pixelFormatBox.Text.Trim()}",
-                    $"AudioChannels={_audioChannelsBox.Value.ToString(CultureInfo.InvariantCulture)}",
-                    $"AudioSyncMs={GetAudioSyncMilliseconds().ToString(CultureInfo.InvariantCulture)}",
-                    $"PrerollSeconds={_prerollBox.Value.ToString(CultureInfo.InvariantCulture)}",
-                    $"Duplex={_duplexBox.SelectedItem?.ToString() ?? string.Empty}",
-                    $"Link={_linkBox.SelectedItem?.ToString() ?? string.Empty}",
-                    $"LevelA={_levelABox.SelectedItem?.ToString() ?? string.Empty}",
                     $"PreviewOnly={_previewOnlyCheckBox.Checked.ToString(CultureInfo.InvariantCulture)}",
                     $"PreviewOnlyUserSet={_previewOnlyUserSet.ToString(CultureInfo.InvariantCulture)}",
                     $"PcAudio={_pcAudioCheckBox.Checked.ToString(CultureInfo.InvariantCulture)}",
@@ -620,20 +575,6 @@ internal sealed class MainForm : Form
         }
 
         numericUpDown.Value = Math.Clamp(value, numericUpDown.Minimum, numericUpDown.Maximum);
-    }
-
-    private static void SetTrackBarSetting(TrackBar trackBar, Dictionary<string, string> settings, string key, int valueStep)
-    {
-        if (!settings.TryGetValue(key, out var rawValue) ||
-            !decimal.TryParse(rawValue, NumberStyles.Number, CultureInfo.InvariantCulture, out var value))
-        {
-            return;
-        }
-
-        var steppedValue = valueStep > 0
-            ? (int)Math.Round((double)value / valueStep)
-            : (int)Math.Round(value);
-        trackBar.Value = Math.Clamp(steppedValue, trackBar.Minimum, trackBar.Maximum);
     }
 
     private static void SelectComboValue(ComboBox comboBox, string? value)
@@ -734,8 +675,6 @@ internal sealed class MainForm : Form
         SetButtonToolTip(_refreshMediaActionBox, "Refresh the folder tree and clip list.");
         SetButtonToolTip(_browseMediaRootActionBox, "Choose a different media library folder.");
         SetButtonToolTip(_refreshDevicesButton, "Reload available DeckLink devices.");
-        SetButtonToolTip(_refreshModesButton, "Reload video modes for the selected DeckLink device.");
-
         SetButtonToolTip(_addToPlaylistButton, "Add the selected clip to the playlist.");
         SetButtonToolTip(_playPlaylistItemButton, "Play the selected playlist row.");
         SetButtonToolTip(_movePlaylistItemUpButton, "Move the selected playlist row up.");
@@ -1252,159 +1191,16 @@ internal sealed class MainForm : Form
             titleLabel.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold, GraphicsUnit.Point);
         }
 
-        var content = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            BackColor = panel.BackColor,
-        };
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 75));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-
         _deviceBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _modeBox.DropDownStyle = ComboBoxStyle.DropDownList;
 
         _refreshDevicesButton.Text = "Refresh";
         StyleButton(_refreshDevicesButton, Color.FromArgb(52, 67, 82));
         _refreshDevicesButton.Click += async (_, _) => await RefreshDevicesAsync();
 
-        _refreshModesButton.Text = "Modes";
-        StyleButton(_refreshModesButton, Color.FromArgb(52, 67, 82));
-        _refreshModesButton.Click += async (_, _) => await RefreshModesAsync();
+        _deviceBox.SelectedIndexChanged += (_, _) => SaveAppSettings();
 
-        _deviceBox.SelectedIndexChanged += async (_, _) =>
-        {
-            SaveAppSettings();
-            await RefreshModesAsync();
-        };
-        _modeBox.SelectedIndexChanged += (_, _) =>
-        {
-            ApplySelectedModeToFields();
-            SaveAppSettings();
-        };
-
-        content.Controls.Add(BuildDeckLinkDeviceModeRow(), 0, 0);
-
-        var outputGrid = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            ColumnCount = 4,
-            RowCount = 3,
-            Height = 75,
-            Padding = new Padding(0),
-        };
-
-        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        outputGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-
-        _videoSizeBox.PlaceholderText = "1920x1080";
-        _frameRateBox.PlaceholderText = "25000/1000";
-        _audioChannelsBox.Minimum = 2;
-        _audioChannelsBox.Maximum = 16;
-        _audioChannelsBox.Increment = 2;
-        _audioSyncSlider.Minimum = -AudioSyncRangeMilliseconds / AudioSyncSliderStepMilliseconds;
-        _audioSyncSlider.Maximum = AudioSyncRangeMilliseconds / AudioSyncSliderStepMilliseconds;
-        _audioSyncSlider.SmallChange = 1;
-        _audioSyncSlider.LargeChange = 5;
-        _audioSyncSlider.TickFrequency = 20;
-        _audioSyncSlider.TickStyle = TickStyle.None;
-        _audioSyncSlider.AutoSize = false;
-        _audioSyncSlider.Height = 22;
-        UpdateAudioSyncSliderLabel();
-        _prerollBox.Minimum = 0;
-        _prerollBox.Maximum = 5;
-        _prerollBox.DecimalPlaces = 1;
-        _prerollBox.Increment = 0.1M;
-        _duplexBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _duplexBox.Items.AddRange(["unset", "half", "full"]);
-        _linkBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _linkBox.Items.AddRange(["unset", "single", "dual", "quad"]);
-        _levelABox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _levelABox.Items.AddRange(["unset", "true", "false"]);
-        RegisterDeckLinkSettingsPersistenceEvents();
-
-        AddCompactGridField(outputGrid, "Size", _videoSizeBox, 0, 0);
-        AddCompactGridField(outputGrid, "Rate", _frameRateBox, 2, 0);
-        AddCompactGridField(outputGrid, "Audio", _audioChannelsBox, 0, 1);
-        AddCompactGridField(outputGrid, "Preroll", _prerollBox, 2, 1);
-
-        content.Controls.Add(outputGrid, 0, 1);
-
-        var tailGrid = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            ColumnCount = 4,
-            RowCount = 2,
-            Height = 50,
-            Padding = new Padding(0),
-        };
-        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        tailGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-
-        AddCompactGridField(tailGrid, "Pixel", _pixelFormatBox, 0, 0);
-        AddCompactGridField(tailGrid, "Duplex", _duplexBox, 2, 0);
-        AddCompactGridField(tailGrid, "Link", _linkBox, 0, 1);
-        AddCompactGridField(tailGrid, "Level A", _levelABox, 2, 1);
-        content.Controls.Add(tailGrid, 0, 2);
-
-        panel.Controls.Add(content);
+        panel.Controls.Add(BuildDeckLinkDeviceRow());
         return panel;
-    }
-
-    private void RegisterDeckLinkSettingsPersistenceEvents()
-    {
-        _videoSizeBox.TextChanged += (_, _) => SaveAppSettings();
-        _frameRateBox.TextChanged += (_, _) =>
-        {
-            SaveAppSettings();
-            RefreshFrameBasedTimeDisplays();
-        };
-        _pixelFormatBox.TextChanged += (_, _) => SaveAppSettings();
-        _audioChannelsBox.ValueChanged += (_, _) => SaveAppSettings();
-        _audioSyncSlider.ValueChanged += (_, _) => AudioSyncSlider_ValueChanged();
-        _prerollBox.ValueChanged += (_, _) => SaveAppSettings();
-        _duplexBox.SelectedIndexChanged += (_, _) => SaveAppSettings();
-        _linkBox.SelectedIndexChanged += (_, _) => SaveAppSettings();
-        _levelABox.SelectedIndexChanged += (_, _) => SaveAppSettings();
-    }
-
-    private void AudioSyncSlider_ValueChanged()
-    {
-        var audioSyncMs = GetAudioSyncMilliseconds();
-        UpdateAudioSyncSliderLabel();
-        if (_playbackPauseController is not null)
-        {
-            _playbackPauseController.AudioSyncMilliseconds = audioSyncMs;
-            SetStatus($"Audio sync {FormatSignedMilliseconds(audioSyncMs)}", Color.FromArgb(232, 181, 105));
-        }
-
-        SaveAppSettings();
-    }
-
-    private int GetAudioSyncMilliseconds()
-    {
-        return _audioSyncSlider.Value * AudioSyncSliderStepMilliseconds;
-    }
-
-    private void UpdateAudioSyncSliderLabel()
-    {
-        _audioSyncValueLabel.Text = FormatSignedMilliseconds(GetAudioSyncMilliseconds());
-    }
-
-    private static string FormatSignedMilliseconds(int milliseconds)
-    {
-        return milliseconds switch
-        {
-            > 0 => $"+{milliseconds.ToString(CultureInfo.InvariantCulture)} ms",
-            < 0 => $"{milliseconds.ToString(CultureInfo.InvariantCulture)} ms",
-            _ => "0 ms",
-        };
     }
 
     private Control BuildDetailsPanel()
@@ -1809,7 +1605,6 @@ internal sealed class MainForm : Form
         _pcAudioCheckBox.ForeColor = Color.FromArgb(224, 232, 236);
         _pcAudioCheckBox.CheckedChanged += (_, _) => SaveAppSettings();
         panel.Controls.Add(_pcAudioCheckBox);
-        panel.Controls.Add(BuildAudioSyncTrimControl());
         return panel;
     }
 
@@ -2215,22 +2010,21 @@ internal sealed class MainForm : Form
         return row;
     }
 
-    private Control BuildDeckLinkDeviceModeRow()
+    private Control BuildDeckLinkDeviceRow()
     {
         var row = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            ColumnCount = 6,
+            ColumnCount = 4,
             RowCount = 1,
-            Height = 28,
+            Height = 34,
             Padding = new Padding(0),
+            Margin = new Padding(0),
         };
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
 
         row.Controls.Add(BuildLabel("Device"), 0, 0);
         row.Controls.Add(StyleCompactInput(_deviceBox), 1, 0);
@@ -2238,53 +2032,11 @@ internal sealed class MainForm : Form
         _refreshDevicesButton.Margin = new Padding(4, 0, 4, 2);
         row.Controls.Add(_refreshDevicesButton, 2, 0);
 
-        row.Controls.Add(BuildLabel("Mode"), 3, 0);
-        row.Controls.Add(StyleCompactInput(_modeBox), 4, 0);
-        _refreshModesButton.Dock = DockStyle.Fill;
-        _refreshModesButton.Margin = new Padding(4, 0, 0, 2);
-        row.Controls.Add(_refreshModesButton, 5, 0);
+        var fixedModeLabel = BuildLabel("Fixed 1080i50");
+        fixedModeLabel.TextAlign = ContentAlignment.MiddleRight;
+        fixedModeLabel.ForeColor = Color.FromArgb(130, 210, 164);
+        row.Controls.Add(fixedModeLabel, 3, 0);
         return row;
-    }
-
-    private Control BuildAudioSyncTrimControl()
-    {
-        var cell = new TableLayoutPanel
-        {
-            Width = 444,
-            Height = 34,
-            ColumnCount = 3,
-            RowCount = 1,
-            Padding = new Padding(0),
-            Margin = new Padding(8, 0, 0, 0),
-            BackColor = BackColor,
-        };
-        cell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
-        cell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        cell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-
-        var label = new Label
-        {
-            Text = "A/V Sync",
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleLeft,
-            ForeColor = Color.FromArgb(166, 179, 190),
-            Margin = new Padding(0),
-        };
-
-        _audioSyncSlider.Dock = DockStyle.Fill;
-        _audioSyncSlider.Margin = new Padding(0, 4, 4, 0);
-        _audioSyncValueLabel.Dock = DockStyle.Fill;
-        _audioSyncValueLabel.TextAlign = ContentAlignment.MiddleRight;
-        _audioSyncValueLabel.ForeColor = Color.FromArgb(232, 237, 240);
-        _audioSyncValueLabel.Margin = new Padding(0);
-
-        cell.Controls.Add(label, 0, 0);
-        cell.Controls.Add(_audioSyncSlider, 1, 0);
-        cell.Controls.Add(_audioSyncValueLabel, 2, 0);
-        SetButtonToolTip(label, "Live audio offset: negative makes audio earlier, positive makes audio later.");
-        SetButtonToolTip(_audioSyncSlider, "Live audio offset: negative makes audio earlier, positive makes audio later.");
-        SetButtonToolTip(_audioSyncValueLabel, "Current live audio sync offset.");
-        return cell;
     }
 
     private Control BuildLibraryRow()
@@ -7868,8 +7620,6 @@ internal sealed class MainForm : Form
     private async Task DisplayScrubPreviewFrameAsync(TimeSpan target)
     {
         var request = BuildRequest(false, target);
-        var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
-        request = _deckLink.ApplyModeDefaults(request, selectedMode);
         var size = ParseVideoSize(request.VideoSize)
             ?? throw new InvalidOperationException("Choose a valid DeckLink output size before scrubbing.");
 
@@ -8671,8 +8421,6 @@ internal sealed class MainForm : Form
     private async Task PreviewNativeSeekFrameAsync(TimeSpan target)
     {
         var request = BuildRequest(false, target);
-        var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
-        request = _deckLink.ApplyModeDefaults(request, selectedMode);
 
         var size = ParseVideoSize(request.VideoSize)
             ?? throw new InvalidOperationException("Choose a valid DeckLink output size before native seek.");
@@ -8913,13 +8661,7 @@ internal sealed class MainForm : Form
 
     private double GetDisplayFrameRate()
     {
-        var rate = ParseFrameRate(_frameRateBox.Text);
-        if (rate <= 0 && _modeBox.SelectedItem is DeckLinkMode mode)
-        {
-            rate = ParseFrameRate(mode.FrameRate);
-        }
-
-        return rate > 0 ? rate : 25;
+        return 25;
     }
 
     private static int GetNominalFrameRate(double frameRate)
@@ -9390,7 +9132,6 @@ internal sealed class MainForm : Form
             var devices = await _deckLink.ListDevicesAsync(GetFfmpegPath(), cancellation.Token);
 
             _deviceBox.Items.Clear();
-            _modeBox.Items.Clear();
             foreach (var device in devices)
             {
                 _deviceBox.Items.Add(device);
@@ -9426,96 +9167,15 @@ internal sealed class MainForm : Form
         }
     }
 
-    private async Task RefreshModesAsync()
-    {
-        if (_isPlaying || _deviceBox.SelectedItem is null)
-        {
-            return;
-        }
-
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        try
-        {
-            SetStatus("Loading DeckLink modes...", Color.FromArgb(126, 188, 226));
-            SetControlsEnabled(false);
-
-            var device = GetSelectedDevice();
-            var previousCode = (_modeBox.SelectedItem as DeckLinkMode)?.Code ?? _savedModeCode;
-            var modes = await _deckLink.ListFormatsAsync(GetFfmpegPath(), device, cancellation.Token);
-
-            _modeBox.Items.Clear();
-            foreach (var mode in modes)
-            {
-                _modeBox.Items.Add(mode);
-            }
-
-            if (_modeBox.Items.Count > 0)
-            {
-                var selectedIndex = FindModeIndex(previousCode) ?? FindModeIndex(DefaultDeckLinkModeCode) ?? 0;
-
-                _modeBox.SelectedIndex = selectedIndex;
-            }
-
-            AppendLog($"Loaded {modes.Count} mode(s) for {device}.");
-            SetStatus("Ready", Color.FromArgb(130, 210, 164));
-        }
-        catch (Exception ex) when (IsDeckLinkUnavailableException(ex))
-        {
-            ApplyDeckLinkUnavailableFallback($"DeckLink modes unavailable. Preview-only mode is available. {FirstLine(ex.Message)}", clearDeckLinkSelection: false);
-        }
-        catch (Exception ex)
-        {
-            AppendLog($"Error: {ex.Message}");
-            SetStatus("Error", Color.FromArgb(229, 113, 105));
-        }
-        finally
-        {
-            SetControlsEnabled(true);
-        }
-    }
-
-    private void ApplySelectedModeToFields()
-    {
-        if (_modeBox.SelectedItem is not DeckLinkMode mode)
-        {
-            return;
-        }
-
-        _videoSizeBox.Text = $"{mode.Width}x{mode.Height}";
-        _frameRateBox.Text = mode.FrameRate;
-
-        _statusLabel.Text = mode.IsInterlaced
-            ? $"{mode.Code} interlaced selected"
-            : "Ready";
-        _statusLabel.ForeColor = mode.IsInterlaced
-            ? Color.FromArgb(232, 181, 105)
-            : Color.FromArgb(130, 210, 164);
-    }
-
     private void ApplyDeckLinkUnavailableFallback(string message, bool clearDeckLinkSelection = true)
     {
         if (clearDeckLinkSelection)
         {
             _deviceBox.Items.Clear();
-            _modeBox.Items.Clear();
-            ApplyDefaultPreviewModeValues();
         }
 
         AppendLog(message);
         SetStatus(clearDeckLinkSelection ? "No DeckLink detected" : "DeckLink unavailable", Color.FromArgb(232, 181, 105));
-    }
-
-    private void ApplyDefaultPreviewModeValues()
-    {
-        if (string.IsNullOrWhiteSpace(_videoSizeBox.Text))
-        {
-            _videoSizeBox.Text = "1920x1080";
-        }
-
-        if (string.IsNullOrWhiteSpace(_frameRateBox.Text))
-        {
-            _frameRateBox.Text = "25000/1000";
-        }
     }
 
     private static bool IsDeckLinkUnavailableException(Exception ex)
@@ -9563,10 +9223,9 @@ internal sealed class MainForm : Form
         try
         {
             var previewOnly = PreviewOnlyMode;
-            var pcAudio = PcAudioMode;
+            var pcAudio = previewOnly && PcAudioMode;
+            var pcAudioSuppressedForDeckLink = !previewOnly && PcAudioMode;
             var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration, playLoop, videoFilter, audioFilter, transitionSegment);
-            var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
-            request = _deckLink.ApplyModeDefaults(request, selectedMode);
             var holdDeckLinkVideoForPlaylistAdvance = ShouldHoldDeckLinkVideoForPlaylistAdvance(previewOnly);
             var commandText = _sdkPlayer.FormatDecoderCommand(
                 request,
@@ -9581,11 +9240,13 @@ internal sealed class MainForm : Form
                 ? pcAudio
                     ? "DeckLink output disabled: app preview with PC audio monitor."
                     : "DeckLink output disabled: app preview only."
-                : request.NoAudio
-                    ? "DeckLink output: Blackmagic SDK direct video frames."
-                    : pcAudio
-                        ? "DeckLink output: Blackmagic SDK direct video frames with embedded audio and PC audio monitor."
+                    : request.NoAudio
+                        ? "DeckLink output: Blackmagic SDK direct video frames."
                         : "DeckLink output: Blackmagic SDK direct video frames with embedded audio.");
+            if (pcAudioSuppressedForDeckLink)
+            {
+                AppendLog("PC audio monitor disabled during DeckLink output to avoid monitoring latency.");
+            }
 
             if (dryRun)
             {
@@ -9601,7 +9262,6 @@ internal sealed class MainForm : Form
             var pauseController = new PlaybackPauseController
             {
                 PlaybackSpeed = _selectedPlaybackSpeed > 0d ? _selectedPlaybackSpeed : 1d,
-                AudioSyncMilliseconds = request.AudioSyncMilliseconds,
             };
             if (startPaused)
             {
@@ -9640,6 +9300,10 @@ internal sealed class MainForm : Form
             LogPlaybackLine("Command:");
             LogPlaybackLine(previewOnly ? "Preview-only decoder command:" : "SDK decoder command:");
             LogPlaybackLine(commandText);
+            if (pcAudioSuppressedForDeckLink)
+            {
+                LogPlaybackLine("PC audio monitor disabled during DeckLink output to avoid monitoring latency.");
+            }
 
             var result = await Task.Run(
                 () => previewOnly
@@ -9659,7 +9323,7 @@ internal sealed class MainForm : Form
                         pauseController,
                         renderInitialFrameWhilePaused: startPaused,
                         previewFrame: UpdateAppPreviewFrame,
-                        previewFrameInterval: 1,
+                        previewFrameInterval: 5,
                         audioMeter: UpdateAudioMeters,
                         monitorPcAudio: pcAudio,
                         holdVideoOutputOnNaturalEnd: holdDeckLinkVideoForPlaylistAdvance),
@@ -9998,8 +9662,6 @@ internal sealed class MainForm : Form
 
         DisposeScrubPreviewHelper();
         var request = BuildRequest(false, target);
-        var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
-        request = _deckLink.ApplyModeDefaults(request, selectedMode);
         var size = ParseVideoSize(request.VideoSize)
             ?? throw new InvalidOperationException("Choose a valid DeckLink output size before reverse playback.");
         var previewOnly = PreviewOnlyMode;
@@ -10049,7 +9711,7 @@ internal sealed class MainForm : Form
                 AppendLog("Reverse DeckLink audio muted above -20x for stability.");
             }
 
-            if (previewOnly || PcAudioMode)
+            if (previewOnly && PcAudioMode)
             {
                 try
                 {
@@ -10254,7 +9916,7 @@ internal sealed class MainForm : Form
         }
 
         var audioFrame = reverseAudio.ReadFrame(frameDuration);
-        var audioByteCount = audioFrame.SampleFrames * (int)_audioChannelsBox.Value * sizeof(int);
+        var audioByteCount = audioFrame.SampleFrames * FfmpegDeckLink.DefaultAudioChannels * sizeof(int);
         if (!audioFrame.HasAudio)
         {
             _reverseWaveAudioOutput?.Enqueue(audioFrame.Pcm, audioByteCount);
@@ -10276,7 +9938,7 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var audioByteCount = sampleFrames * (int)_audioChannelsBox.Value * sizeof(int);
+        var audioByteCount = sampleFrames * FfmpegDeckLink.DefaultAudioChannels * sizeof(int);
         if (_reverseDeckLinkAudioOutput is not null)
         {
             if (!_reverseDeckLinkAudioOutput.Enqueue(pcm, audioByteCount, sampleFrames))
@@ -10305,7 +9967,7 @@ internal sealed class MainForm : Form
 
     private void UpdateReverseAudioMeters(byte[] pcm, int sampleFrames)
     {
-        var channels = (int)_audioChannelsBox.Value;
+        var channels = FfmpegDeckLink.DefaultAudioChannels;
         var bytesPerSampleFrame = channels * sizeof(int);
         if (channels <= 0 || bytesPerSampleFrame <= 0 || pcm.Length < bytesPerSampleFrame)
         {
@@ -10729,42 +10391,9 @@ internal sealed class MainForm : Form
             throw new InvalidOperationException("Choose a DeckLink output device.");
         }
 
-        var audioChannels = (int)_audioChannelsBox.Value;
-        if (audioChannels < 2 || audioChannels > 16)
-        {
-            throw new InvalidOperationException("Audio channels must be between 2 and 16.");
-        }
-
-        var duplexMode = _duplexBox.SelectedItem?.ToString();
-        if (string.Equals(duplexMode, "unset", StringComparison.OrdinalIgnoreCase))
-        {
-            duplexMode = null;
-        }
-
-        var linkMode = _linkBox.SelectedItem?.ToString();
-        if (string.Equals(linkMode, "unset", StringComparison.OrdinalIgnoreCase))
-        {
-            linkMode = null;
-        }
-
-        var levelA = ParseOptionalBool(_levelABox.SelectedItem?.ToString());
-
         var selectedDevice = previewOnly
             ? _deviceBox.SelectedItem?.ToString() ?? "Preview Only"
             : GetSelectedDevice();
-        if (!previewOnly && selectedDevice.Contains("SDI 4K", StringComparison.OrdinalIgnoreCase))
-        {
-            duplexMode = null;
-        }
-
-        var selectedMode = _modeBox.SelectedItem as DeckLinkMode;
-        var videoSize = EmptyToNull(_videoSizeBox.Text);
-        var frameRate = EmptyToNull(_frameRateBox.Text);
-        if (previewOnly)
-        {
-            videoSize ??= selectedMode is not null ? $"{selectedMode.Width}x{selectedMode.Height}" : "1920x1080";
-            frameRate ??= selectedMode?.FrameRate ?? "25000/1000";
-        }
 
         var isStillImage = IsImageFile(inputPath);
         var normalizedStartOffset = useTestPattern || isStillImage
@@ -10781,26 +10410,25 @@ internal sealed class MainForm : Form
             GetFfmpegPath(),
             inputPath,
             selectedDevice,
-            selectedMode?.Code,
-            videoSize,
-            frameRate,
-            EmptyToNull(_pixelFormatBox.Text) ?? FfmpegDeckLink.DefaultPixelFormat,
-            audioChannels,
-            (double)_prerollBox.Value,
-            duplexMode,
-            linkMode,
-            levelA,
+            DefaultDeckLinkModeCode,
+            FixedDeckLinkVideoSize,
+            FixedDeckLinkFrameRate,
+            FfmpegDeckLink.DefaultPixelFormat,
+            FfmpegDeckLink.DefaultAudioChannels,
+            FfmpegDeckLink.DefaultPrerollSeconds,
+            null,
+            "single",
+            true,
             VideoFilter: videoFilter,
             AudioFilter: audioFilter,
             loopPlayback,
             useTestPattern || isStillImage,
-            selectedMode?.IsInterlaced == true,
-            selectedMode?.FieldOrder,
+            true,
+            FixedDeckLinkFieldOrder,
             useTestPattern,
             normalizedStartOffset,
             normalizedPlayDuration,
-            transitionSegment,
-            AudioSyncMilliseconds: GetAudioSyncMilliseconds());
+            transitionSegment);
     }
 
     private async Task RunUiTaskAsync(string status, Func<CancellationToken, Task> task)
@@ -10911,25 +10539,6 @@ internal sealed class MainForm : Form
         return null;
     }
 
-    private int? FindModeIndex(string? modeCode)
-    {
-        if (string.IsNullOrWhiteSpace(modeCode))
-        {
-            return null;
-        }
-
-        for (var i = 0; i < _modeBox.Items.Count; i++)
-        {
-            if (_modeBox.Items[i] is DeckLinkMode mode &&
-                string.Equals(mode.Code, modeCode, StringComparison.OrdinalIgnoreCase))
-            {
-                return i;
-            }
-        }
-
-        return null;
-    }
-
     private static string? EmptyToNull(string value)
     {
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
@@ -10951,7 +10560,6 @@ internal sealed class MainForm : Form
         _stopButton.Enabled = isPlaying;
         _pauseResumeButton.Enabled = isPlaying;
         _refreshDevicesButton.Enabled = !isPlaying;
-        _refreshModesButton.Enabled = !isPlaying && HasDeckLinkDevice;
         _refreshMediaButton.Enabled = !isPlaying;
         _browseMediaRootButton.Enabled = true;
         _mediaRootPathBox.Enabled = true;
@@ -10977,7 +10585,6 @@ internal sealed class MainForm : Form
     private void SetControlsEnabled(bool enabled)
     {
         _refreshDevicesButton.Enabled = enabled;
-        _refreshModesButton.Enabled = enabled && HasDeckLinkDevice;
         _pauseResumeButton.Enabled = _isPlaying;
         _refreshMediaButton.Enabled = enabled && !_isPlaying;
         _browseMediaRootButton.Enabled = enabled;

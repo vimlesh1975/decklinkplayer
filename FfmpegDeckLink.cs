@@ -318,18 +318,7 @@ internal sealed partial class FfmpegDeckLink
 
     private static List<string> BuildAudioFilters(PlayRequest options)
     {
-        var filters = new List<string>();
-        if (options.AudioSyncMilliseconds > 0)
-        {
-            filters.Add($"adelay={options.AudioSyncMilliseconds}:all=1");
-        }
-        else if (options.AudioSyncMilliseconds < 0)
-        {
-            filters.Add($"atrim=start={(-options.AudioSyncMilliseconds / 1000d).ToString("0.###", CultureInfo.InvariantCulture)}");
-            filters.Add("asetpts=PTS-STARTPTS");
-        }
-
-        return filters;
+        return [];
     }
 
     private static string GetSetFieldMode(string? fieldOrder)
@@ -619,8 +608,7 @@ internal sealed record PlayRequest(
     bool UseTestPattern,
     TimeSpan StartOffset = default,
     TimeSpan? Duration = null,
-    PlaylistTransitionSegment? TransitionSegment = null,
-    int AudioSyncMilliseconds = 0);
+    PlaylistTransitionSegment? TransitionSegment = null);
 
 internal sealed record PlaylistTransitionSegment(
     string NextInputPath,

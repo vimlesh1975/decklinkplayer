@@ -6,7 +6,6 @@ internal sealed class PlaybackPauseController
     private TaskCompletionSource? _resumeSignal;
     private bool _preserveVideoOutputOnStop;
     private double _playbackSpeed = 1d;
-    private int _audioSyncMilliseconds;
 
     public event Action<bool>? PauseStateChanged;
 
@@ -55,24 +54,6 @@ internal sealed class PlaybackPauseController
                 _playbackSpeed = value > 0d && !double.IsNaN(value) && !double.IsInfinity(value)
                     ? value
                     : 1d;
-            }
-        }
-    }
-
-    public int AudioSyncMilliseconds
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _audioSyncMilliseconds;
-            }
-        }
-        set
-        {
-            lock (_gate)
-            {
-                _audioSyncMilliseconds = Math.Clamp(value, -2000, 2000);
             }
         }
     }
