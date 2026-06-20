@@ -11,17 +11,18 @@ internal sealed class ReverseWaveOutAudioOutput : IDisposable
     private const int WaveMapper = -1;
     private const int WaveFormatPcm = 1;
     private const int WhdrDone = 0x00000001;
-    private const int MaxPendingBuffers = 20;
+    private const int DefaultMaxPendingBuffers = 20;
 
     private readonly object _gate = new();
     private readonly List<WaveBuffer> _pendingBuffers = [];
     private readonly int _sourceChannels;
     private readonly int _outputChannels;
     private readonly double _gain;
+    private readonly int _maxPendingBuffers;
     private IntPtr _waveOut;
     private bool _disposed;
 
-    public ReverseWaveOutAudioOutput(int sourceChannels, double gain = 1d)
+    public ReverseWaveOutAudioOutput(int sourceChannels, double gain = 1d, int maxPendingBuffers = DefaultMaxPendingBuffers)
     {
         if (sourceChannels <= 0)
         {
@@ -31,6 +32,7 @@ internal sealed class ReverseWaveOutAudioOutput : IDisposable
         _sourceChannels = sourceChannels;
         _outputChannels = Math.Min(sourceChannels, 2);
         _gain = Math.Clamp(gain, 0.05d, 1d);
+        _maxPendingBuffers = Math.Clamp(maxPendingBuffers, 2, DefaultMaxPendingBuffers);
         var format = new WaveFormatEx
         {
             FormatTag = WaveFormatPcm,
@@ -71,7 +73,7 @@ internal sealed class ReverseWaveOutAudioOutput : IDisposable
             }
 
             CleanupCompletedBuffersUnderLock();
-            if (_pendingBuffers.Count >= MaxPendingBuffers)
+            if (_pendingBuffers.Count >= _maxPendingBuffers)
             {
                 // Keep reverse video responsive; drop audio rather than building latency.
                 return;
@@ -80,6 +82,28 @@ internal sealed class ReverseWaveOutAudioOutput : IDisposable
             var buffer = new WaveBuffer(pcm16);
             PrepareAndWriteBuffer(buffer);
             _pendingBuffers.Add(buffer);
+        }
+    }
+
+    public async Task WaitForCapacityAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                CleanupCompletedBuffersUnderLock();
+                if (_pendingBuffers.Count < _maxPendingBuffers)
+                {
+                    return;
+                }
+            }
+
+            await Task.Delay(2, cancellationToken);
         }
     }
 

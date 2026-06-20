@@ -20,7 +20,8 @@ internal sealed class DeckLinkSdkPlayer
     public string FormatDecoderCommand(
         PlayRequest request,
         bool throttleAudioRealtime = false,
-        bool monitorPcAudio = false)
+        bool monitorPcAudio = false,
+        bool useInternalPcAudioMonitor = false)
     {
         var commands = new List<string>
         {
@@ -32,7 +33,9 @@ internal sealed class DeckLinkSdkPlayer
             commands.Add("Audio: " + FormatCommand(request.FfmpegPath, BuildAudioDecoderArguments(request, throttleAudioRealtime)));
             if (monitorPcAudio)
             {
-                commands.Add("PC Audio: " + FormatCommand(GetFfplayPath(request.FfmpegPath), BuildPcAudioMonitorArguments(request)));
+                commands.Add(useInternalPcAudioMonitor
+                    ? "PC Audio: internal WaveOut monitor (speed follows playback controls)"
+                    : "PC Audio: " + FormatCommand(GetFfplayPath(request.FfmpegPath), BuildPcAudioMonitorArguments(request)));
             }
         }
 
@@ -104,15 +107,13 @@ internal sealed class DeckLinkSdkPlayer
         }
 
         Process? audioDecoder = null;
-        Process? pcAudioMonitor = null;
+        ReverseWaveOutAudioOutput? pcAudioOutput = null;
         var stderr = new List<string>();
         var videoStderrTask = Task.Run(
             () => PumpErrorAsync(videoDecoder, "video-decoder", stderr, logLine, cancellationToken),
             cancellationToken);
         Task? audioStderrTask = null;
         Task? audioPumpTask = null;
-        Task? pcAudioMonitorStderrTask = null;
-        ProcessPauseBinding? pcAudioPauseBinding = null;
         var audioOutputEnabled = false;
 
         var killedByCancellation = false;
@@ -122,7 +123,6 @@ internal sealed class DeckLinkSdkPlayer
             killedByCancellation = true;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
-            TryKill(pcAudioMonitor);
         });
 
         try
@@ -150,18 +150,22 @@ internal sealed class DeckLinkSdkPlayer
                 audioStderrTask = Task.Run(
                     () => PumpErrorAsync(audioDecoder, "audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
-                audioPumpTask = Task.Run(
-                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, cancellationToken),
-                    cancellationToken);
                 if (monitorPcAudio)
                 {
-                    pcAudioMonitor = StartPcAudioMonitor(request);
-                    pcAudioPauseBinding = new ProcessPauseBinding(pcAudioMonitor, pauseController, logLine, "pc-audio");
-                    pcAudioMonitorStderrTask = Task.Run(
-                        () => PumpErrorAsync(pcAudioMonitor, "pc-audio", stderr, logLine, cancellationToken),
-                        cancellationToken);
-                    logLine?.Invoke("PC audio monitor started with bundled ffplay.exe.");
+                    try
+                    {
+                        pcAudioOutput = new ReverseWaveOutAudioOutput(request.AudioChannels, maxPendingBuffers: 6);
+                        logLine?.Invoke("PC audio monitor started with internal speed-following WaveOut output.");
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or COMException)
+                    {
+                        logLine?.Invoke($"PC audio monitor unavailable: {ex.Message}");
+                    }
                 }
+
+                audioPumpTask = Task.Run(
+                    () => PumpAudioAsync(output, outputLock, audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, pcAudioOutput, cancellationToken),
+                    cancellationToken);
             }
 
             var audioDescription = request.NoAudio
@@ -265,11 +269,8 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
-            pcAudioPauseBinding?.Dispose();
-            pcAudioPauseBinding = null;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
-            TryKill(pcAudioMonitor);
 
             await videoDecoder.WaitForExitAsync(CancellationToken.None);
             if (audioDecoder is not null)
@@ -278,17 +279,10 @@ internal sealed class DeckLinkSdkPlayer
                 audioDecoder.Dispose();
                 audioDecoder = null;
             }
-            if (pcAudioMonitor is not null)
-            {
-                await pcAudioMonitor.WaitForExitAsync(CancellationToken.None);
-                pcAudioMonitor.Dispose();
-                pcAudioMonitor = null;
-            }
 
             await IgnoreCancellationAsync(videoStderrTask);
             await IgnoreCancellationAsync(audioStderrTask);
             await IgnoreCancellationAsync(audioPumpTask);
-            await IgnoreCancellationAsync(pcAudioMonitorStderrTask);
 
             var exitCode = videoDecoder.ExitCode;
             completedSuccessfully = !killedByCancellation && exitCode == 0;
@@ -296,18 +290,13 @@ internal sealed class DeckLinkSdkPlayer
         }
         finally
         {
-            pcAudioPauseBinding?.Dispose();
             TryKill(videoDecoder);
             videoDecoder.Dispose();
             TryKill(audioDecoder);
-            TryKill(pcAudioMonitor);
+            pcAudioOutput?.Dispose();
             if (audioDecoder is not null)
             {
                 audioDecoder.Dispose();
-            }
-            if (pcAudioMonitor is not null)
-            {
-                pcAudioMonitor.Dispose();
             }
 
             if (audioOutputEnabled)
@@ -380,15 +369,13 @@ internal sealed class DeckLinkSdkPlayer
 
         using var videoDecoder = StartVideoDecoder(request);
         Process? audioDecoder = null;
-        Process? pcAudioMonitor = null;
+        ReverseWaveOutAudioOutput? pcAudioOutput = null;
         var stderr = new List<string>();
         var videoStderrTask = Task.Run(
             () => PumpErrorAsync(videoDecoder, "preview-video-decoder", stderr, logLine, cancellationToken),
             cancellationToken);
         Task? audioStderrTask = null;
         Task? audioPumpTask = null;
-        Task? pcAudioMonitorStderrTask = null;
-        ProcessPauseBinding? pcAudioPauseBinding = null;
         var killedByCancellation = false;
 
         using var cancellationRegistration = cancellationToken.Register(() =>
@@ -396,29 +383,32 @@ internal sealed class DeckLinkSdkPlayer
             killedByCancellation = true;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
-            TryKill(pcAudioMonitor);
         });
 
         try
         {
             if (!request.NoAudio)
             {
-                audioDecoder = StartAudioDecoder(request, throttleRealtime: true);
+                audioDecoder = StartAudioDecoder(request, throttleRealtime: false);
                 audioStderrTask = Task.Run(
                     () => PumpErrorAsync(audioDecoder, "preview-audio-decoder", stderr, logLine, cancellationToken),
                     cancellationToken);
-                audioPumpTask = Task.Run(
-                    () => PumpAudioMeterOnlyAsync(audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, cancellationToken),
-                    cancellationToken);
                 if (monitorPcAudio)
                 {
-                    pcAudioMonitor = StartPcAudioMonitor(request);
-                    pcAudioPauseBinding = new ProcessPauseBinding(pcAudioMonitor, pauseController, logLine, "preview-pc-audio");
-                    pcAudioMonitorStderrTask = Task.Run(
-                        () => PumpErrorAsync(pcAudioMonitor, "preview-pc-audio", stderr, logLine, cancellationToken),
-                        cancellationToken);
-                    logLine?.Invoke("PC audio monitor started with bundled ffplay.exe.");
+                    try
+                    {
+                        pcAudioOutput = new ReverseWaveOutAudioOutput(request.AudioChannels, maxPendingBuffers: 6);
+                        logLine?.Invoke("PC audio monitor started with internal speed-following WaveOut output.");
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or COMException)
+                    {
+                        logLine?.Invoke($"PC audio monitor unavailable: {ex.Message}");
+                    }
                 }
+
+                audioPumpTask = Task.Run(
+                    () => PumpAudioMeterOnlyAsync(audioDecoder, request.AudioChannels, pauseController, logLine, audioMeter, pcAudioOutput, cancellationToken),
+                    cancellationToken);
             }
 
             var audioDescription = request.NoAudio
@@ -498,11 +488,8 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
-            pcAudioPauseBinding?.Dispose();
-            pcAudioPauseBinding = null;
             TryKill(videoDecoder);
             TryKill(audioDecoder);
-            TryKill(pcAudioMonitor);
 
             await videoDecoder.WaitForExitAsync(CancellationToken.None);
             if (audioDecoder is not null)
@@ -511,33 +498,21 @@ internal sealed class DeckLinkSdkPlayer
                 audioDecoder.Dispose();
                 audioDecoder = null;
             }
-            if (pcAudioMonitor is not null)
-            {
-                await pcAudioMonitor.WaitForExitAsync(CancellationToken.None);
-                pcAudioMonitor.Dispose();
-                pcAudioMonitor = null;
-            }
 
             await IgnoreCancellationAsync(videoStderrTask);
             await IgnoreCancellationAsync(audioStderrTask);
             await IgnoreCancellationAsync(audioPumpTask);
-            await IgnoreCancellationAsync(pcAudioMonitorStderrTask);
 
             return new ProcessResult(videoDecoder.ExitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
         }
         finally
         {
-            pcAudioPauseBinding?.Dispose();
             TryKill(videoDecoder);
             TryKill(audioDecoder);
-            TryKill(pcAudioMonitor);
+            pcAudioOutput?.Dispose();
             if (audioDecoder is not null)
             {
                 audioDecoder.Dispose();
-            }
-            if (pcAudioMonitor is not null)
-            {
-                pcAudioMonitor.Dispose();
             }
         }
     }
@@ -1202,6 +1177,7 @@ internal sealed class DeckLinkSdkPlayer
         PlaybackPauseController? pauseController,
         Action<string>? logLine,
         Action<double, double>? audioMeter,
+        ReverseWaveOutAudioOutput? pcAudioOutput,
         CancellationToken cancellationToken)
     {
         var bytesPerSampleFrame = checked(channels * AudioBytesPerSample);
@@ -1274,6 +1250,11 @@ internal sealed class DeckLinkSdkPlayer
                     logLine,
                     cancellationToken);
 
+                if (pcAudioOutput is not null && written > 0)
+                {
+                    pcAudioOutput.Enqueue(managedBuffer, checked((int)written * bytesPerSampleFrame));
+                }
+
                 var previousTotal = totalWritten;
                 totalWritten += written;
                 if (totalWritten / AudioSampleRate != previousTotal / AudioSampleRate)
@@ -1298,30 +1279,45 @@ internal sealed class DeckLinkSdkPlayer
         PlaybackPauseController? pauseController,
         Action<string>? logLine,
         Action<double, double>? audioMeter,
+        ReverseWaveOutAudioOutput? pcAudioOutput,
         CancellationToken cancellationToken)
     {
         var bytesPerSampleFrame = checked(channels * AudioBytesPerSample);
         var bufferBytes = checked(AudioChunkSampleFrames * bytesPerSampleFrame);
         var managedBuffer = new byte[bufferBytes];
+        var sourceSpeedBuffer = managedBuffer;
         var totalRead = 0L;
         var meterPeakLeft = 0L;
         var meterPeakRight = 0L;
         var meterSampleFrames = 0;
+        var sourceSampleFrameCarry = 0d;
+        var stopwatch = Stopwatch.StartNew();
+        var nextAudioDueTicks = stopwatch.ElapsedTicks;
 
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                if (pauseController is not null)
+                if (pauseController?.IsPaused == true)
                 {
+                    var pauseStartedTicks = stopwatch.ElapsedTicks;
                     await pauseController.WaitIfPausedAsync(cancellationToken);
+                    nextAudioDueTicks += stopwatch.ElapsedTicks - pauseStartedTicks;
                 }
 
-                var bytesRead = await ReadAlignedAudioBlockAsync(
+                var speed = GetForwardPlaybackSpeed(pauseController);
+                var speedRead = await ReadSpeedAdjustedAudioBlockAsync(
                     audioDecoder.StandardOutput.BaseStream,
                     managedBuffer,
+                    sourceSpeedBuffer,
+                    AudioChunkSampleFrames,
                     bytesPerSampleFrame,
+                    speed,
+                    sourceSampleFrameCarry,
                     cancellationToken);
+                sourceSpeedBuffer = speedRead.SourceBuffer;
+                sourceSampleFrameCarry = speedRead.SourceSampleFrameCarry;
+                var bytesRead = speedRead.BytesRead;
 
                 if (bytesRead <= 0)
                 {
@@ -1348,11 +1344,37 @@ internal sealed class DeckLinkSdkPlayer
                     }
                 }
 
+                if (pcAudioOutput is not null)
+                {
+                    await pcAudioOutput.WaitForCapacityAsync(cancellationToken);
+                    pcAudioOutput.Enqueue(managedBuffer, bytesRead);
+                }
+
                 var previousTotal = totalRead;
                 totalRead += sampleFrameCount;
                 if (totalRead / AudioSampleRate != previousTotal / AudioSampleRate)
                 {
                     logLine?.Invoke($"preview_audio_samples={totalRead}");
+                }
+
+                if (pcAudioOutput is null)
+                {
+                    nextAudioDueTicks += sampleFrameCount * Stopwatch.Frequency / AudioSampleRate;
+                    var remainingTicks = nextAudioDueTicks - stopwatch.ElapsedTicks;
+                    if (remainingTicks < -Stopwatch.Frequency)
+                    {
+                        nextAudioDueTicks = stopwatch.ElapsedTicks;
+                        remainingTicks = 0;
+                    }
+
+                    if (remainingTicks > 0)
+                    {
+                        var delayMs = (int)Math.Min(remainingTicks * 1000 / Stopwatch.Frequency, 100);
+                        if (delayMs > 0)
+                        {
+                            await Task.Delay(delayMs, cancellationToken);
+                        }
+                    }
                 }
             }
         }

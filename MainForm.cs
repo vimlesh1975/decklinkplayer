@@ -9223,14 +9223,14 @@ internal sealed class MainForm : Form
         try
         {
             var previewOnly = PreviewOnlyMode;
-            var pcAudio = previewOnly && PcAudioMode;
-            var pcAudioSuppressedForDeckLink = !previewOnly && PcAudioMode;
+            var pcAudio = PcAudioMode;
             var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration, playLoop, videoFilter, audioFilter, transitionSegment);
             var holdDeckLinkVideoForPlaylistAdvance = ShouldHoldDeckLinkVideoForPlaylistAdvance(previewOnly);
             var commandText = _sdkPlayer.FormatDecoderCommand(
                 request,
-                throttleAudioRealtime: previewOnly,
-                monitorPcAudio: pcAudio);
+                throttleAudioRealtime: false,
+                monitorPcAudio: pcAudio,
+                useInternalPcAudioMonitor: pcAudio);
 
             AppendLog("");
             AppendLog("Command:");
@@ -9242,11 +9242,9 @@ internal sealed class MainForm : Form
                     : "DeckLink output disabled: app preview only."
                     : request.NoAudio
                         ? "DeckLink output: Blackmagic SDK direct video frames."
-                        : "DeckLink output: Blackmagic SDK direct video frames with embedded audio.");
-            if (pcAudioSuppressedForDeckLink)
-            {
-                AppendLog("PC audio monitor disabled during DeckLink output to avoid monitoring latency.");
-            }
+                        : pcAudio
+                            ? "DeckLink output: Blackmagic SDK direct video frames with embedded audio and PC audio monitor."
+                            : "DeckLink output: Blackmagic SDK direct video frames with embedded audio.");
 
             if (dryRun)
             {
@@ -9300,10 +9298,6 @@ internal sealed class MainForm : Form
             LogPlaybackLine("Command:");
             LogPlaybackLine(previewOnly ? "Preview-only decoder command:" : "SDK decoder command:");
             LogPlaybackLine(commandText);
-            if (pcAudioSuppressedForDeckLink)
-            {
-                LogPlaybackLine("PC audio monitor disabled during DeckLink output to avoid monitoring latency.");
-            }
 
             var result = await Task.Run(
                 () => previewOnly
@@ -9711,16 +9705,16 @@ internal sealed class MainForm : Form
                 AppendLog("Reverse DeckLink audio muted above -20x for stability.");
             }
 
-            if (previewOnly && PcAudioMode)
+            if (PcAudioMode)
             {
                 try
                 {
                     _reverseWaveAudioOutput = new ReverseWaveOutAudioOutput(request.AudioChannels, GetReverseAudioMonitorGain(reverseAudioSpeed));
-                    AppendLog("Reverse Windows audio monitor started.");
+                    AppendLog("Reverse PC audio monitor started.");
                 }
                 catch (Exception ex)
                 {
-                    AppendLog($"Reverse Windows audio unavailable: {ex.Message}");
+                    AppendLog($"Reverse PC audio unavailable: {ex.Message}");
                 }
             }
         }
