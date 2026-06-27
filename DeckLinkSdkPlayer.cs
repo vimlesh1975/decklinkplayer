@@ -62,7 +62,8 @@ internal sealed class DeckLinkSdkPlayer
         int previewFrameInterval = 5,
         Action<double, double>? audioMeter = null,
         bool monitorPcAudio = false,
-        bool holdVideoOutputOnNaturalEnd = false)
+        bool holdVideoOutputOnNaturalEnd = false,
+        Action<TimeSpan>? playbackPosition = null)
     {
         var mode = ResolveDisplayMode(request);
         var acquiredOutput = AcquireDeckLinkOutput(request.Device, mode.DisplayMode, logLine);
@@ -179,7 +180,9 @@ internal sealed class DeckLinkSdkPlayer
             var frameNumber = 0L;
             var stopwatch = Stopwatch.StartNew();
             var frameTicks = Math.Max(1L, Stopwatch.Frequency * frameDuration / Math.Max(1L, timeScale));
+            var sourceFrameTime = TimeSpan.FromSeconds(frameDuration / (double)Math.Max(1L, timeScale));
             var sourceFrameCarry = 0d;
+            var sourceFramesRead = 0L;
             var renderedInitialPausedFrame = false;
             var reachedVideoEnd = false;
 
@@ -209,6 +212,7 @@ internal sealed class DeckLinkSdkPlayer
                     }
 
                     readAnyFrame = true;
+                    sourceFramesRead++;
                 }
 
                 if (!readAnyFrame)
@@ -250,6 +254,12 @@ internal sealed class DeckLinkSdkPlayer
                     var previewBuffer = new byte[frameBytes];
                     Buffer.BlockCopy(frameBuffer, 0, previewBuffer, 0, frameBytes);
                     previewFrame(previewBuffer, width, height);
+                }
+
+                if (playbackPosition is not null &&
+                    (frameNumber == 1 || (previewFrameInterval > 0 && frameNumber % previewFrameInterval == 0)))
+                {
+                    playbackPosition(request.StartOffset + TimeSpan.FromTicks(sourceFrameTime.Ticks * sourceFramesRead));
                 }
 
                 if (shouldRenderInitialPausedFrame)
@@ -370,7 +380,8 @@ internal sealed class DeckLinkSdkPlayer
         bool renderInitialFrameWhilePaused = false,
         Action<byte[], int, int>? previewFrame = null,
         Action<double, double>? audioMeter = null,
-        bool monitorPcAudio = false)
+        bool monitorPcAudio = false,
+        Action<TimeSpan>? playbackPosition = null)
     {
         var size = ParseVideoSize(request.VideoSize)
             ?? throw new InvalidOperationException("Preview-only playback needs a valid video size.");
@@ -432,8 +443,10 @@ internal sealed class DeckLinkSdkPlayer
             var frameNumber = 0L;
             var stopwatch = Stopwatch.StartNew();
             var frameTicks = GetFrameTicks(request.FrameRate);
+            var sourceFrameTime = TimeSpan.FromSeconds(1d / ParseFrameRate(request.FrameRate));
             var nextFrameDueTicks = stopwatch.ElapsedTicks;
             var sourceFrameCarry = 0d;
+            var sourceFramesRead = 0L;
             var renderedInitialPausedFrame = false;
             var reachedVideoEnd = false;
 
@@ -463,6 +476,7 @@ internal sealed class DeckLinkSdkPlayer
                     }
 
                     readAnyFrame = true;
+                    sourceFramesRead++;
                 }
 
                 if (!readAnyFrame)
@@ -472,6 +486,7 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 previewFrame?.Invoke(frameBuffer, width, height);
+                playbackPosition?.Invoke(request.StartOffset + TimeSpan.FromTicks(sourceFrameTime.Ticks * sourceFramesRead));
 
                 frameNumber++;
                 if (shouldRenderInitialPausedFrame)

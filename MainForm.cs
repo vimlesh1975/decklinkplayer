@@ -265,6 +265,7 @@ internal sealed class MainForm : Form
     private string? _scrubPreviewOutputDisabledPath;
     private DateTime _nextReverseDeckLinkRetryAt = DateTime.MinValue;
     private DateTime _lastReverseDeckLinkFailureLogAt = DateTime.MinValue;
+    private DateTime _lastPlaybackProgressUiAt = DateTime.MinValue;
     private string _mediaRootPath = DefaultMediaRootPath;
     private string? _selectedMediaFolderPath;
     private int? _playlistPlayingIndex;
@@ -7394,6 +7395,7 @@ internal sealed class MainForm : Form
         _playbackClockSampleAt = _playbackStartedAt;
         _playbackClockElapsed = TimeSpan.Zero;
         _playbackPausedDuration = TimeSpan.Zero;
+        _lastPlaybackProgressUiAt = DateTime.MinValue;
         _playbackStartOffset = TimeSpan.Zero;
         _playbackEndOffset = null;
         _playbackPath = request.UseTestPattern ? null : request.InputPath;
@@ -7465,6 +7467,7 @@ internal sealed class MainForm : Form
         _playbackClockSampleAt = null;
         _playbackClockElapsed = TimeSpan.Zero;
         _playbackPausedDuration = TimeSpan.Zero;
+        _lastPlaybackProgressUiAt = DateTime.MinValue;
         _playbackStartOffset = TimeSpan.Zero;
         _playbackEndOffset = null;
         _playbackPath = null;
@@ -7474,6 +7477,55 @@ internal sealed class MainForm : Form
         _playbackIsTestPattern = false;
         UpdateLoadedFileLabel();
         ResetAudioMeters();
+    }
+
+    private void UpdatePlaybackPositionFromDecoder(TimeSpan sourcePosition)
+    {
+        if (IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(() => UpdatePlaybackPositionFromDecoder(sourcePosition));
+            }
+            catch
+            {
+                // The form may be closing while a decoder callback is in flight.
+            }
+
+            return;
+        }
+
+        if (!_isPlaying || !_playbackStartedAt.HasValue)
+        {
+            return;
+        }
+
+        sourcePosition = ClampSeekOffset(sourcePosition, _playbackDuration);
+        var elapsed = sourcePosition - _playbackStartOffset;
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        _playbackClockElapsed = elapsed;
+        _playbackClockSampleAt = DateTime.UtcNow;
+
+        var shouldRefresh = DateTime.UtcNow - _lastPlaybackProgressUiAt >= TimeSpan.FromMilliseconds(100);
+        if (_playbackDuration.HasValue && sourcePosition >= _playbackDuration.Value)
+        {
+            shouldRefresh = true;
+        }
+
+        if (shouldRefresh)
+        {
+            _lastPlaybackProgressUiAt = DateTime.UtcNow;
+            UpdatePlaybackDurationLabel();
+        }
     }
 
     private void UpdateDurationLabel()
@@ -9554,7 +9606,8 @@ internal sealed class MainForm : Form
                         renderInitialFrameWhilePaused: startPaused,
                         previewFrame: UpdateAppPreviewFrame,
                         audioMeter: UpdateAudioMeters,
-                        monitorPcAudio: pcAudio)
+                        monitorPcAudio: pcAudio,
+                        playbackPosition: UpdatePlaybackPositionFromDecoder)
                     : _sdkPlayer.PlayAsync(
                         request,
                         LogPlaybackLine,
@@ -9565,7 +9618,8 @@ internal sealed class MainForm : Form
                         previewFrameInterval: 5,
                         audioMeter: UpdateAudioMeters,
                         monitorPcAudio: pcAudio,
-                        holdVideoOutputOnNaturalEnd: holdDeckLinkVideoForPlaylistAdvance),
+                        holdVideoOutputOnNaturalEnd: holdDeckLinkVideoForPlaylistAdvance,
+                        playbackPosition: UpdatePlaybackPositionFromDecoder),
                 _playbackCancellation.Token);
 
             ProcessResult result;
