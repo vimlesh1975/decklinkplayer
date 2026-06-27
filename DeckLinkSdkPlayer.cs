@@ -14,6 +14,7 @@ internal sealed class DeckLinkSdkPlayer
     private const int AudioChunkSampleFrames = AudioSampleRate / 100;
     private const int AudioWriteZeroRetryDelayMs = 2;
     private const int AudioWriteStallLogMilliseconds = 500;
+    private const int DecoderNaturalExitGraceMilliseconds = 3000;
     private static readonly object HeldVideoOutputGate = new();
     private static HeldVideoOutput? s_heldVideoOutput;
 
@@ -118,6 +119,7 @@ internal sealed class DeckLinkSdkPlayer
 
         var killedByCancellation = false;
         var completedSuccessfully = false;
+        var displayedVideoFrame = false;
         using var cancellationRegistration = cancellationToken.Register(() =>
         {
             killedByCancellation = true;
@@ -179,6 +181,7 @@ internal sealed class DeckLinkSdkPlayer
             var frameTicks = Math.Max(1L, Stopwatch.Frequency * frameDuration / Math.Max(1L, timeScale));
             var sourceFrameCarry = 0d;
             var renderedInitialPausedFrame = false;
+            var reachedVideoEnd = false;
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -210,6 +213,7 @@ internal sealed class DeckLinkSdkPlayer
 
                 if (!readAnyFrame)
                 {
+                    reachedVideoEnd = frameNumber > 0 && !cancellationToken.IsCancellationRequested;
                     break;
                 }
 
@@ -232,6 +236,7 @@ internal sealed class DeckLinkSdkPlayer
                         output.DisplayVideoFrameSync((IDeckLinkVideoFrame_v14_2_1)mutableFrame);
                     }
 
+                    displayedVideoFrame = true;
                 }
                 finally
                 {
@@ -269,23 +274,25 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
-            TryKill(videoDecoder);
-            TryKill(audioDecoder);
-
-            await videoDecoder.WaitForExitAsync(CancellationToken.None);
+            var forceDecoderKill = killedByCancellation || cancellationToken.IsCancellationRequested;
+            await WaitForDecoderExitOrKillAsync(videoDecoder, forceDecoderKill, "video decoder", logLine);
             if (audioDecoder is not null)
             {
-                await audioDecoder.WaitForExitAsync(CancellationToken.None);
-                audioDecoder.Dispose();
-                audioDecoder = null;
+                await WaitForDecoderExitOrKillAsync(audioDecoder, forceDecoderKill, "audio decoder", logLine);
             }
 
             await IgnoreCancellationAsync(videoStderrTask);
             await IgnoreCancellationAsync(audioStderrTask);
             await IgnoreCancellationAsync(audioPumpTask);
 
-            var exitCode = videoDecoder.ExitCode;
-            completedSuccessfully = !killedByCancellation && exitCode == 0;
+            var rawExitCode = videoDecoder.ExitCode;
+            completedSuccessfully = !killedByCancellation && reachedVideoEnd;
+            var exitCode = completedSuccessfully ? 0 : rawExitCode;
+            if (completedSuccessfully && rawExitCode != 0)
+            {
+                logLine?.Invoke($"video decoder exited with code {rawExitCode} after EOF; treating playlist playback as complete.");
+            }
+
             return new ProcessResult(exitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
         }
         finally
@@ -323,11 +330,16 @@ internal sealed class DeckLinkSdkPlayer
             var shouldHoldVideoOutput =
                 videoOutputEnabled &&
                 ((killedByCancellation && pauseController?.PreserveVideoOutputOnStop == true) ||
-                    (holdVideoOutputOnNaturalEnd && completedSuccessfully));
+                    (holdVideoOutputOnNaturalEnd && !killedByCancellation && displayedVideoFrame));
 
             if (shouldHoldVideoOutput)
             {
-                HoldVideoOutput(request.Device, mode.DisplayMode, deckLink, output, logLine);
+                HoldVideoOutput(
+                    request.Device,
+                    mode.DisplayMode,
+                    deckLink,
+                    output,
+                    logLine);
                 videoOutputHeld = true;
             }
             else if (videoOutputEnabled)
@@ -423,6 +435,7 @@ internal sealed class DeckLinkSdkPlayer
             var nextFrameDueTicks = stopwatch.ElapsedTicks;
             var sourceFrameCarry = 0d;
             var renderedInitialPausedFrame = false;
+            var reachedVideoEnd = false;
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -454,6 +467,7 @@ internal sealed class DeckLinkSdkPlayer
 
                 if (!readAnyFrame)
                 {
+                    reachedVideoEnd = frameNumber > 0 && !cancellationToken.IsCancellationRequested;
                     break;
                 }
 
@@ -488,22 +502,25 @@ internal sealed class DeckLinkSdkPlayer
                 }
             }
 
-            TryKill(videoDecoder);
-            TryKill(audioDecoder);
-
-            await videoDecoder.WaitForExitAsync(CancellationToken.None);
+            var forceDecoderKill = killedByCancellation || cancellationToken.IsCancellationRequested;
+            await WaitForDecoderExitOrKillAsync(videoDecoder, forceDecoderKill, "preview video decoder", logLine);
             if (audioDecoder is not null)
             {
-                await audioDecoder.WaitForExitAsync(CancellationToken.None);
-                audioDecoder.Dispose();
-                audioDecoder = null;
+                await WaitForDecoderExitOrKillAsync(audioDecoder, forceDecoderKill, "preview audio decoder", logLine);
             }
 
             await IgnoreCancellationAsync(videoStderrTask);
             await IgnoreCancellationAsync(audioStderrTask);
             await IgnoreCancellationAsync(audioPumpTask);
 
-            return new ProcessResult(videoDecoder.ExitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
+            var rawExitCode = videoDecoder.ExitCode;
+            var exitCode = !killedByCancellation && reachedVideoEnd ? 0 : rawExitCode;
+            if (exitCode == 0 && rawExitCode != 0)
+            {
+                logLine?.Invoke($"preview video decoder exited with code {rawExitCode} after EOF; treating playlist playback as complete.");
+            }
+
+            return new ProcessResult(exitCode, string.Empty, string.Join(Environment.NewLine, stderr), killedByCancellation);
         }
         finally
         {
@@ -531,21 +548,55 @@ internal sealed class DeckLinkSdkPlayer
             {
                 var held = s_heldVideoOutput;
                 s_heldVideoOutput = null;
-                return (held.DeckLink, held.Output, true);
-            }
+                if (TryValidateHeldVideoOutput(held, displayMode, logLine))
+                {
+                    return (held.DeckLink, held.Output, true);
+                }
 
-            heldToRelease = s_heldVideoOutput;
-            s_heldVideoOutput = null;
+                heldToRelease = held;
+            }
+            else
+            {
+                heldToRelease = s_heldVideoOutput;
+                s_heldVideoOutput = null;
+            }
         }
 
         if (heldToRelease is not null)
         {
-            logLine?.Invoke("Releasing held DeckLink frame because the replacement output changed.");
+            if (!string.Equals(heldToRelease.Device, requestedDevice, StringComparison.OrdinalIgnoreCase) ||
+                heldToRelease.DisplayMode != displayMode)
+            {
+                logLine?.Invoke("Releasing held DeckLink frame because the replacement output changed.");
+            }
+
             ReleaseHeldVideoOutput(heldToRelease);
         }
 
         var deckLink = FindDeckLink(requestedDevice);
         return (deckLink, (IDeckLinkOutput_v14_2_1)deckLink, false);
+    }
+
+    private static bool TryValidateHeldVideoOutput(
+        HeldVideoOutput held,
+        _BMDDisplayMode displayMode,
+        Action<string>? logLine)
+    {
+        IDeckLinkDisplayMode? displayModeInfo = null;
+        try
+        {
+            held.Output.GetDisplayMode(displayMode, out displayModeInfo);
+            return true;
+        }
+        catch (Exception ex) when (ex is COMException or InvalidCastException or InvalidOperationException)
+        {
+            logLine?.Invoke($"Held DeckLink output is stale; reopening card. {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            ReleaseCom(displayModeInfo);
+        }
     }
 
     internal static bool TryTakeHeldDeckLinkOutput(
@@ -560,9 +611,10 @@ internal sealed class DeckLinkSdkPlayer
                 string.Equals(s_heldVideoOutput.Device, requestedDevice, StringComparison.OrdinalIgnoreCase) &&
                 s_heldVideoOutput.DisplayMode == displayMode)
             {
-                deckLink = s_heldVideoOutput.DeckLink;
-                output = s_heldVideoOutput.Output;
+                var held = s_heldVideoOutput;
                 s_heldVideoOutput = null;
+                deckLink = held.DeckLink;
+                output = held.Output;
                 return true;
             }
         }
@@ -1267,6 +1319,10 @@ internal sealed class DeckLinkSdkPlayer
         {
             // Expected during Stop.
         }
+        catch (ObjectDisposedException)
+        {
+            // The decoder stdout can close while the audio pump is draining at EOF.
+        }
         finally
         {
             Marshal.FreeHGlobal(unmanagedBuffer);
@@ -1564,6 +1620,37 @@ internal sealed class DeckLinkSdkPlayer
         catch (OperationCanceledException)
         {
             // Expected during Stop.
+        }
+    }
+
+    private static async Task WaitForDecoderExitOrKillAsync(
+        Process? process,
+        bool forceKill,
+        string name,
+        Action<string>? logLine)
+    {
+        if (process is null)
+        {
+            return;
+        }
+
+        if (forceKill)
+        {
+            TryKill(process);
+            await process.WaitForExitAsync(CancellationToken.None);
+            return;
+        }
+
+        using var timeout = new CancellationTokenSource(DecoderNaturalExitGraceMilliseconds);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            logLine?.Invoke($"{name} did not exit after EOF; killing it.");
+            TryKill(process);
+            await process.WaitForExitAsync(CancellationToken.None);
         }
     }
 

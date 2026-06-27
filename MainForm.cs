@@ -32,7 +32,7 @@ internal sealed class MainForm : Form
     private const string PlaylistTransitionWipe = "Wipe";
     private const string PlaylistTransitionSlide = "Slide";
     private const string PlaylistTransitionFadeBlack = "Fade Black";
-    private const string DefaultPlaylistTransition = PlaylistTransitionWipe;
+    private const string DefaultPlaylistTransition = PlaylistTransitionCut;
     private const string PlaylistFileFilter = "DeckLink playlist (*.dpl)|*.dpl|JSON playlist (*.json)|*.json|All files (*.*)|*.*";
     private const string MediaGridDragDataFormat = "DeckLinkPlayer.MediaPath";
     private const string PlaylistDragDataFormat = "DeckLinkPlayer.PlaylistRowIndex";
@@ -74,15 +74,6 @@ internal sealed class MainForm : Form
     private static readonly TimeSpan DefaultStillDuration = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DefaultTransitionDuration = TimeSpan.FromSeconds(1);
     private static readonly double[] PlaybackSpeedOptions = [-20d, -10d, -5d, -2d, -1.5d, -1d, 0d, 1d, 1.5d, 2d, 5d, 10d, 20d];
-    private static readonly string[] PlaylistTransitionOptions =
-    [
-        PlaylistTransitionCut,
-        PlaylistTransitionMix,
-        PlaylistTransitionPush,
-        PlaylistTransitionWipe,
-        PlaylistTransitionSlide,
-        PlaylistTransitionFadeBlack,
-    ];
     private static readonly JsonSerializerOptions PlaylistJsonOptions = new() { WriteIndented = true };
 
     private readonly FfmpegDeckLink _deckLink = new();
@@ -90,7 +81,7 @@ internal sealed class MainForm : Form
     private readonly TextBox _inputPathBox = new();
     private readonly TextBox _mediaRootPathBox = new();
     private readonly TextBox _mediaSearchBox = new();
-    private readonly CheckBox _darkModeCheckBox = new();
+    private readonly ThemedCheckBox _darkModeCheckBox = new();
     private readonly TreeView _mediaTree = new();
     private readonly DataGridView _mediaGrid = new();
     private readonly ContextMenuStrip _mediaGridContextMenu = new();
@@ -138,7 +129,6 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _playlistMenuSetStartTime = new("Set Start Time Accordinging To CurrentRow");
     private readonly ToolStripMenuItem _playlistMenuInsertPlaylist = new("Insert Playlist");
     private readonly ToolStripMenuItem _playlistMenuInsertFilter = new("Insert Filter");
-    private readonly ToolStripMenuItem _playlistMenuChangeAllTransition = new("Change All Transition");
     private readonly ToolStripMenuItem _playlistMenuPlayInFfplay = new("Play in ffplay");
     private readonly ToolStripMenuItem _playlistMenuCuePrevious = new("Cue Prev");
     private readonly ToolStripMenuItem _playlistMenuPlayPrevious = new("Play Prev");
@@ -165,8 +155,8 @@ internal sealed class MainForm : Form
     private readonly Button _toggleSettingsButton = new();
     private readonly Button _toggleLogButton = new();
     private readonly Button _fullscreenPreviewButton = new();
-    private readonly CheckBox _previewOnlyCheckBox = new();
-    private readonly CheckBox _pcAudioCheckBox = new();
+    private readonly ThemedCheckBox _previewOnlyCheckBox = new();
+    private readonly ThemedCheckBox _pcAudioCheckBox = new();
     private readonly Button _refreshDevicesButton = new();
     private readonly Button _seekBackOneSecondButton = new();
     private readonly Button _seekBackTenFramesButton = new();
@@ -1260,7 +1250,7 @@ internal sealed class MainForm : Form
         _durationLabel.AutoSize = false;
         _durationLabel.Dock = DockStyle.Fill;
         _durationLabel.Margin = new Padding(0);
-        _durationLabel.Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold, GraphicsUnit.Point);
+        _durationLabel.Font = new Font("Consolas", 16F, FontStyle.Bold, GraphicsUnit.Point);
         _durationLabel.ForeColor = Color.FromArgb(236, 241, 244);
         _durationLabel.BackColor = Color.FromArgb(30, 35, 40);
         _durationLabel.TextAlign = ContentAlignment.MiddleCenter;
@@ -1314,7 +1304,7 @@ internal sealed class MainForm : Form
         _currentTimeLabel.AutoSize = false;
         _currentTimeLabel.Dock = DockStyle.Fill;
         _currentTimeLabel.Margin = new Padding(0);
-        _currentTimeLabel.Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold, GraphicsUnit.Point);
+        _currentTimeLabel.Font = new Font("Consolas", 16F, FontStyle.Bold, GraphicsUnit.Point);
         _currentTimeLabel.ForeColor = Color.FromArgb(236, 241, 244);
         _currentTimeLabel.BackColor = Color.FromArgb(30, 35, 40);
         _currentTimeLabel.TextAlign = ContentAlignment.MiddleCenter;
@@ -1352,12 +1342,14 @@ internal sealed class MainForm : Form
         _positionStartLabel.Text = FormatClock(TimeSpan.Zero);
         _positionStartLabel.AutoSize = false;
         _positionStartLabel.Dock = DockStyle.Fill;
+        _positionStartLabel.Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point);
         _positionStartLabel.TextAlign = ContentAlignment.MiddleLeft;
         _positionStartLabel.ForeColor = Color.FromArgb(172, 184, 192);
 
         _positionEndLabel.Text = "--";
         _positionEndLabel.AutoSize = false;
         _positionEndLabel.Dock = DockStyle.Fill;
+        _positionEndLabel.Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point);
         _positionEndLabel.TextAlign = ContentAlignment.MiddleRight;
         _positionEndLabel.ForeColor = Color.FromArgb(172, 184, 192);
 
@@ -1508,8 +1500,10 @@ internal sealed class MainForm : Form
         ConfigureTrimButton(_nextCueButton, "Next Cue", 86, Color.FromArgb(52, 67, 82), () => CueRelativePlaylistItem(1));
         ConfigureTrimButton(_markInButton, "IN", 38, Color.FromArgb(52, 67, 82), MarkTrimIn);
         ConfigureTrimButton(_markOutButton, "Out", 44, Color.FromArgb(52, 67, 82), MarkTrimOut);
-        ConfigureSeekTextBox(_markInValueBox, 68, readOnly: true);
-        ConfigureSeekTextBox(_markOutValueBox, 68, readOnly: true);
+        ConfigureSeekTextBox(_markInValueBox, 68, readOnly: false);
+        ConfigureSeekTextBox(_markOutValueBox, 68, readOnly: false);
+        BindEditableTrimBox(_markInValueBox, isMarkIn: true);
+        BindEditableTrimBox(_markOutValueBox, isMarkIn: false);
         ConfigureSeekCommandButton(_goToInButton, "Go to IN", 70, GoToInAsync);
         ConfigureSeekCommandButton(_playFromInButton, "Play from IN", 98, PlayFromInAsync);
         ConfigureSeekCommandButton(_goToTcButton, "GoTo TC", 72, GoToTimecodeAsync);
@@ -2417,9 +2411,11 @@ internal sealed class MainForm : Form
             case NumericUpDown numeric:
                 ApplyInputTheme(numeric, dark);
                 break;
+            case ThemedCheckBox themedCheckBox:
+                ApplyCheckBoxTheme(themedCheckBox, dark);
+                break;
             case CheckBox checkBox:
-                checkBox.BackColor = ThemePanelColor(dark);
-                checkBox.ForeColor = ThemeTextColor(dark);
+                ApplyCheckBoxTheme(checkBox, dark);
                 break;
             case Label label:
                 ApplyLabelTheme(label, dark);
@@ -2549,6 +2545,16 @@ internal sealed class MainForm : Form
     {
         input.BackColor = dark ? Color.FromArgb(20, 24, 28) : Color.White;
         input.ForeColor = dark ? Color.FromArgb(232, 237, 240) : Color.FromArgb(24, 29, 34);
+    }
+
+    private static void ApplyCheckBoxTheme(CheckBox checkBox, bool dark)
+    {
+        checkBox.BackColor = ThemePanelColor(dark);
+        checkBox.ForeColor = dark ? Color.White : Color.FromArgb(24, 29, 34);
+        if (checkBox is ThemedCheckBox themedCheckBox)
+        {
+            themedCheckBox.DarkMode = dark;
+        }
     }
 
     private void ApplyButtonTheme(Button button, bool dark)
@@ -2893,24 +2899,6 @@ internal sealed class MainForm : Form
             ThreeState = false,
             SortMode = DataGridViewColumnSortMode.NotSortable,
         });
-        var transitionColumn = new DataGridViewComboBoxColumn
-        {
-            Name = "Transition",
-            HeaderText = "Transition",
-            Width = 88,
-            FlatStyle = FlatStyle.Flat,
-            DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton,
-            SortMode = DataGridViewColumnSortMode.NotSortable,
-        };
-        transitionColumn.Items.AddRange(PlaylistTransitionOptions);
-        _playlistGrid.Columns.Add(transitionColumn);
-        _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
-        {
-            Name = "TransitionDuration",
-            HeaderText = "Trans Dur",
-            Width = 92,
-            SortMode = DataGridViewColumnSortMode.NotSortable,
-        });
         _playlistGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "EndTime",
@@ -2926,7 +2914,7 @@ internal sealed class MainForm : Form
         });
         foreach (DataGridViewColumn column in _playlistGrid.Columns)
         {
-            column.ReadOnly = column.Name is not "PlayEnabled" and not "LoopEnabled" and not "Transition";
+            column.ReadOnly = column.Name is not "PlayEnabled" and not "LoopEnabled";
         }
         foreach (var frozenColumnName in new[] { "Number", "StartTime", "PlayEnabled", "Clip" })
         {
@@ -3000,7 +2988,6 @@ internal sealed class MainForm : Form
         ConfigurePlaceholderSubmenu(_playlistMenuInsertDecklink, "DeckLink input insert is not implemented yet.");
         ConfigurePlaceholderSubmenu(_playlistMenuShowLiveDecklink, "Live DeckLink preview is not implemented yet.");
         ConfigurePlaceholderSubmenu(_playlistMenuInsertFilter, "Filter insert is not implemented yet.");
-        ConfigurePlaylistTransitionSubmenu();
         _playlistMenuInsertBlank.Enabled = false;
         _playlistMenuRefreshThumbnail.Enabled = false;
 
@@ -3032,31 +3019,10 @@ internal sealed class MainForm : Form
                 _playlistMenuSetStartTime,
                 _playlistMenuInsertPlaylist,
                 _playlistMenuInsertFilter,
-                _playlistMenuChangeAllTransition,
                 _playlistMenuPlayInFfplay,
             ]);
         _playlistGrid.ContextMenuStrip = _playlistContextMenu;
         ApplyContextMenuTheme(_playlistContextMenu, _darkMode);
-    }
-
-    private void ConfigurePlaylistTransitionSubmenu()
-    {
-        _playlistMenuChangeAllTransition.DropDownItems.Clear();
-        AddPlaylistTransitionMenuItem("Cut", PlaylistTransitionCut, DefaultTransitionDuration);
-        AddPlaylistTransitionMenuItem("Mix 1 sec", PlaylistTransitionMix, TimeSpan.FromSeconds(1));
-        AddPlaylistTransitionMenuItem("Push 1 sec", PlaylistTransitionPush, TimeSpan.FromSeconds(1));
-        AddPlaylistTransitionMenuItem("Wipe 1 sec", PlaylistTransitionWipe, TimeSpan.FromSeconds(1));
-        AddPlaylistTransitionMenuItem("Slide 1 sec", PlaylistTransitionSlide, TimeSpan.FromSeconds(1));
-        AddPlaylistTransitionMenuItem("Fade Through Black 0.5 sec", PlaylistTransitionFadeBlack, TimeSpan.FromMilliseconds(500));
-        AddPlaylistTransitionMenuItem("Fade Through Black 1 sec", PlaylistTransitionFadeBlack, TimeSpan.FromSeconds(1));
-        AddPlaylistTransitionMenuItem("Fade Through Black 2 sec", PlaylistTransitionFadeBlack, TimeSpan.FromSeconds(2));
-    }
-
-    private void AddPlaylistTransitionMenuItem(string text, string transition, TimeSpan duration)
-    {
-        var item = new ToolStripMenuItem(text);
-        item.Click += (_, _) => SetAllPlaylistTransitions(transition, duration);
-        _playlistMenuChangeAllTransition.DropDownItems.Add(item);
     }
 
     private static void RebindMenuClick(ToolStripMenuItem item, EventHandler handler)
@@ -3110,7 +3076,6 @@ internal sealed class MainForm : Form
         _playlistMenuDeselectAll.Enabled = _playlistItems.Count > 0;
         _playlistMenuSetStartTime.Enabled = selectedCanSetStart;
         _playlistMenuInsertPlaylist.Enabled = !_isPlaying && !_playlistPlayingIndex.HasValue && !_playlistPlaybackActive;
-        _playlistMenuChangeAllTransition.Enabled = _playlistItems.Any(item => !item.IsEndMarker);
         _playlistMenuPlayInFfplay.Enabled = selectedFileExists;
     }
 
@@ -3242,33 +3207,6 @@ internal sealed class MainForm : Form
     private void PlaylistMenuDeselectAll_Click(object? sender, EventArgs e)
     {
         SetPlaylistPlayEnabledForAll(false);
-    }
-
-    private void SetAllPlaylistTransitions(string transition, TimeSpan duration)
-    {
-        var changed = 0;
-        var normalizedTransition = NormalizePlaylistTransition(transition);
-        var normalizedDuration = duration > TimeSpan.Zero ? duration : DefaultTransitionDuration;
-        foreach (var item in _playlistItems)
-        {
-            if (item.IsEndMarker)
-            {
-                continue;
-            }
-
-            item.Transition = normalizedTransition;
-            item.TransitionDuration = normalizedDuration;
-            changed++;
-        }
-
-        RefreshPlaylistGrid(GetSelectedPlaylistIndex());
-        SetStatus(
-            changed == 0
-                ? "No playlist rows to change"
-                : normalizedTransition == PlaylistTransitionCut
-                    ? $"Changed {changed} row(s) to Cut"
-                    : $"Changed {changed} row(s) to Fade Black {FormatPlaylistTime(normalizedDuration)}",
-            changed == 0 ? Color.FromArgb(232, 181, 105) : Color.FromArgb(130, 210, 164));
     }
 
     private void PlaylistMenuPlayInFfplay_Click(object? sender, EventArgs e)
@@ -3552,7 +3490,7 @@ internal sealed class MainForm : Form
         }
 
         var columnName = _playlistGrid.Columns[e.ColumnIndex].Name;
-        if (columnName is not "PlayEnabled" and not "LoopEnabled" and not "Transition")
+        if (columnName is not "PlayEnabled" and not "LoopEnabled")
         {
             return;
         }
@@ -3567,25 +3505,6 @@ internal sealed class MainForm : Form
             item.TransitionDuration = DefaultTransitionDuration;
             item.Status = PlaylistStatusEnd;
             RefreshPlaylistGrid(e.RowIndex);
-            return;
-        }
-
-        if (columnName == "Transition")
-        {
-            var transitionText = _playlistGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString();
-            var transition = NormalizePlaylistTransition(transitionText);
-            item.Transition = transition;
-            if (transition == PlaylistTransitionCut)
-            {
-                item.TransitionDuration = DefaultTransitionDuration;
-            }
-            else if (item.TransitionDuration <= TimeSpan.Zero)
-            {
-                item.TransitionDuration = DefaultTransitionDuration;
-            }
-
-            RefreshPlaylistGrid(e.RowIndex);
-            SetStatus($"Transition set to {transition}", Color.FromArgb(130, 210, 164));
             return;
         }
 
@@ -3746,16 +3665,15 @@ internal sealed class MainForm : Form
 
     private static void PreparePlaylistItemForInsert(PlaylistItem item)
     {
-        if (!item.IsEndMarker)
-        {
-            return;
-        }
-
-        item.PlayEnabled = false;
-        item.LoopEnabled = false;
         item.Transition = PlaylistTransitionCut;
         item.TransitionDuration = DefaultTransitionDuration;
-        item.Status = PlaylistStatusEnd;
+
+        if (item.IsEndMarker)
+        {
+            item.PlayEnabled = false;
+            item.LoopEnabled = false;
+            item.Status = PlaylistStatusEnd;
+        }
     }
 
     private void InsertEndMarker()
@@ -4008,8 +3926,8 @@ internal sealed class MainForm : Form
             TcOut = FormatPlaylistFileTime(item.TcOut),
             SourceDuration = FormatPlaylistFileTime(item.SourceDuration),
             TimelineStart = FormatPlaylistFileTime(item.TimelineStartOverride),
-            Transition = item.Transition,
-            TransitionDuration = FormatPlaylistFileTime(item.TransitionDuration),
+            Transition = PlaylistTransitionCut,
+            TransitionDuration = null,
             PlayEnabled = item.PlayEnabled,
             LoopEnabled = item.LoopEnabled,
         };
@@ -4047,18 +3965,14 @@ internal sealed class MainForm : Form
         var timelineStart = TryParsePlaylistFileTime(fileItem.TimelineStart, out var parsedTimelineStart)
             ? parsedTimelineStart
             : (TimeSpan?)null;
-        var transitionDuration = TryParsePlaylistFileTime(fileItem.TransitionDuration, out var parsedTransitionDuration)
-            ? parsedTransitionDuration
-            : DefaultTransitionDuration;
-
         return new PlaylistItem(path)
         {
             TcIn = tcIn,
             TcOut = tcOut,
             SourceDuration = sourceDuration,
             TimelineStartOverride = timelineStart,
-            Transition = NormalizePlaylistTransition(fileItem.Transition),
-            TransitionDuration = transitionDuration > TimeSpan.Zero ? transitionDuration : DefaultTransitionDuration,
+            Transition = PlaylistTransitionCut,
+            TransitionDuration = DefaultTransitionDuration,
             PlayEnabled = fileItem.PlayEnabled,
             LoopEnabled = fileItem.LoopEnabled,
             Status = File.Exists(path) ? PlaylistStatusReady : PlaylistStatusMissing,
@@ -4131,7 +4045,7 @@ internal sealed class MainForm : Form
 
     private static bool IsTimedPlaylistTransition(string? transition)
     {
-        return NormalizePlaylistTransition(transition) != PlaylistTransitionCut;
+        return false;
     }
 
     private void SetSelectedPlaylistStartTime()
@@ -4323,6 +4237,91 @@ internal sealed class MainForm : Form
         UpdateTrimControls();
     }
 
+    private void BindEditableTrimBox(TextBox textBox, bool isMarkIn)
+    {
+        textBox.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                ApplyEditableTrimMark(textBox, isMarkIn);
+            }
+            else if (e.KeyCode == Keys.Escape)
+            {
+                e.SuppressKeyPress = true;
+                RestoreEditableTrimMarkText(textBox, isMarkIn);
+            }
+        };
+        textBox.Leave += (_, _) => ApplyEditableTrimMark(textBox, isMarkIn);
+    }
+
+    private void ApplyEditableTrimMark(TextBox textBox, bool isMarkIn)
+    {
+        var path = GetCurrentMediaPath();
+        if (path is null || IsImageFile(path))
+        {
+            SetStatus("Choose a seekable media file first", Color.FromArgb(232, 181, 105));
+            RestoreEditableTrimMarkText(textBox, isMarkIn);
+            return;
+        }
+
+        var duration = GetCurrentSeekDuration() ?? GetKnownMediaDuration(path);
+        if (!duration.HasValue)
+        {
+            SetStatus("Duration must be known before setting IN/OUT", Color.FromArgb(232, 181, 105));
+            RestoreEditableTrimMarkText(textBox, isMarkIn);
+            return;
+        }
+
+        if (!TryParseTimecodeOffset(textBox.Text, out var typedPosition))
+        {
+            SetStatus(isMarkIn ? "Invalid IN timecode" : "Invalid OUT timecode", Color.FromArgb(232, 181, 105));
+            RestoreEditableTrimMarkText(textBox, isMarkIn);
+            return;
+        }
+
+        EnsureTrimMarksForPath(path);
+        var position = ClampSeekOffset(typedPosition, duration.Value);
+        if (isMarkIn)
+        {
+            _markInOffset = position;
+            if (_markOutOffset.HasValue && _markOutOffset.Value <= position)
+            {
+                _markOutOffset = null;
+            }
+
+            SetStatus($"Mark In {FormatPlaylistTime(position)}", Color.FromArgb(130, 210, 164));
+        }
+        else
+        {
+            var markIn = _markInOffset ?? TimeSpan.Zero;
+            if (position <= markIn)
+            {
+                SetStatus("Mark Out must be after Mark In", Color.FromArgb(232, 181, 105));
+                RestoreEditableTrimMarkText(textBox, isMarkIn);
+                return;
+            }
+
+            _markInOffset ??= TimeSpan.Zero;
+            _markOutOffset = position;
+            SetStatus($"Mark Out {FormatPlaylistTime(position)}", Color.FromArgb(130, 210, 164));
+        }
+
+        UpdateDurationLabel();
+        UpdateTrimControls(forceTextUpdate: true);
+    }
+
+    private void RestoreEditableTrimMarkText(TextBox textBox, bool isMarkIn)
+    {
+        if (TryGetCurrentTrimRange(out _, out var markIn, out var markOut, out _))
+        {
+            textBox.Text = FormatPlaylistTime(isMarkIn ? markIn : markOut);
+            return;
+        }
+
+        textBox.Text = "--";
+    }
+
     private void AddTrimmedClipToPlaylist()
     {
         var path = GetCurrentMediaPath();
@@ -4436,30 +4435,20 @@ internal sealed class MainForm : Form
             }
 
             var duration = await TryProbeDurationForPlaylistSeedAsync(ambFile, cancellation.Token);
-            var demoTransitions = new[]
+            _playlistItems.Add(new PlaylistItem(ambFile)
             {
-                PlaylistTransitionMix,
-                PlaylistTransitionPush,
-                PlaylistTransitionWipe,
-                PlaylistTransitionSlide,
-            };
-            for (var i = 0; i < demoTransitions.Length; i++)
-            {
-                _playlistItems.Add(new PlaylistItem(ambFile)
-                {
-                    SourceDuration = duration,
-                    TcIn = TimeSpan.Zero,
-                    TcOut = duration,
-                    Transition = demoTransitions[i],
-                    TransitionDuration = DefaultTransitionDuration,
-                    Status = PlaylistStatusReady,
-                });
-            }
+                SourceDuration = duration,
+                TcIn = TimeSpan.Zero,
+                TcOut = duration,
+                Transition = PlaylistTransitionCut,
+                TransitionDuration = DefaultTransitionDuration,
+                Status = PlaylistStatusReady,
+            });
 
             if (_playlistItems.Count > 0)
             {
                 RefreshPlaylistGrid(0);
-                SetStatus("Loaded AMB with Mix, Push, Wipe, Slide", Color.FromArgb(130, 210, 164));
+                SetStatus("Loaded AMB playlist seed", Color.FromArgb(130, 210, 164));
             }
         }
         catch (OperationCanceledException)
@@ -4762,8 +4751,8 @@ internal sealed class MainForm : Form
             TcOut = source.TcOut,
             PlayEnabled = source.PlayEnabled,
             LoopEnabled = source.LoopEnabled,
-            Transition = source.Transition,
-            TransitionDuration = source.TransitionDuration,
+            Transition = PlaylistTransitionCut,
+            TransitionDuration = DefaultTransitionDuration,
             Status = PlaylistStatusReady,
         };
     }
@@ -5219,6 +5208,7 @@ internal sealed class MainForm : Form
         }
 
         ClearPlaylistTransitionLeadIn();
+        RearmPlaylistRun(startIndex.Value);
         _playlistPlaybackActive = true;
         UpdatePlaylistButtons();
         SetStatus("Playlist started", Color.FromArgb(126, 188, 226));
@@ -5246,7 +5236,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    private async Task PlayPlaylistItemAsync(int index)
+    private async Task PlayPlaylistItemAsync(int index, bool fromAutoNext = false)
     {
         if (index < 0 || index >= _playlistItems.Count)
         {
@@ -5276,7 +5266,10 @@ internal sealed class MainForm : Form
             return;
         }
 
-        RearmPlaylistForManualPlay(index);
+        if (!_playlistPlaybackActive)
+        {
+            RearmPlaylistForManualPlay(index);
+        }
         var item = _playlistItems[index].Snapshot();
         var playDuration = GetEffectivePlaylistPlayDuration(item);
         var consumedLeadIn = ConsumePlaylistTransitionLeadIn(index, playDuration);
@@ -5288,13 +5281,20 @@ internal sealed class MainForm : Form
                 : TimeSpan.FromMilliseconds(250);
         }
 
-        await StopActivePlaybackForReplacementAsync();
+        if (fromAutoNext)
+        {
+            await WaitForFinishedPlaybackWithoutCancellingAsync();
+        }
+        else
+        {
+            await StopActivePlaybackForReplacementAsync();
+        }
 
         SelectMediaPath(item.FullPath);
         _selectedStartOffset = startOffset;
         SetPlaylistStartTimeFromPlayback(index);
         MarkPlaylistItemPlaying(index);
-        AppendLog($"Starting playlist row {index + 1}: {Path.GetFileName(item.FullPath)}");
+        AppendPlaylistLog($"Starting playlist row {index + 1}: {Path.GetFileName(item.FullPath)}");
         var transitionPlan = BuildPlaylistTransitionPlan(index, item, playDuration);
         if (transitionPlan is not null)
         {
@@ -5561,6 +5561,23 @@ internal sealed class MainForm : Form
         }
     }
 
+    private async Task WaitForFinishedPlaybackWithoutCancellingAsync()
+    {
+        if (!_isPlaying)
+        {
+            return;
+        }
+
+        var stoppedTask = _playbackStoppedSignal?.Task;
+        if (stoppedTask is null)
+        {
+            return;
+        }
+
+        AppendPlaylistLog("Playlist auto-next waiting for previous row cleanup without stopping DeckLink output.");
+        await stoppedTask;
+    }
+
     private void MarkPlaylistItemPlaying(int index)
     {
         _playlistPlayingIndex = index;
@@ -5646,6 +5663,32 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void RearmPlaylistRun(int startIndex)
+    {
+        if (startIndex < 0 || startIndex >= _playlistItems.Count)
+        {
+            return;
+        }
+
+        for (var i = 0; i < _playlistItems.Count; i++)
+        {
+            var item = _playlistItems[i];
+            if (item.IsEndMarker)
+            {
+                item.PlayEnabled = false;
+                item.LoopEnabled = false;
+                item.Transition = PlaylistTransitionCut;
+                item.TransitionDuration = DefaultTransitionDuration;
+                item.Status = PlaylistStatusEnd;
+                continue;
+            }
+
+            item.Transition = PlaylistTransitionCut;
+            item.TransitionDuration = DefaultTransitionDuration;
+            item.Status = File.Exists(item.FullPath) ? PlaylistStatusReady : PlaylistStatusMissing;
+        }
+    }
+
     private void CompletePlaylistPlayback(bool completedNormally)
     {
         if (!_playlistPlayingIndex.HasValue)
@@ -5657,9 +5700,16 @@ internal sealed class MainForm : Form
         _playlistPlayingIndex = null;
         int? nextToPlay = null;
         int? endMarkerIndex = null;
+        AppendPlaylistLog($"Playlist row {index + 1} finished: completed={completedNormally}, active={_playlistPlaybackActive}.");
+        var shouldContinuePlaylist = completedNormally || _playlistPlaybackActive;
+        if (!completedNormally && _playlistPlaybackActive)
+        {
+            AppendPlaylistLog($"Playlist row {index + 1} ended without normal completion, but playlist mode is still active; continuing.");
+        }
+
         if (index >= 0 && index < _playlistItems.Count)
         {
-            if (completedNormally &&
+            if (shouldContinuePlaylist &&
                 !_playlistItems[index].IsEndMarker &&
                 _playlistItems[index].LoopEnabled &&
                 _playlistItems[index].PlayEnabled &&
@@ -5671,10 +5721,10 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            _playlistItems[index].Status = completedNormally ? PlaylistStatusPlayed : PlaylistStatusReady;
-            if (completedNormally && _playlistPlaybackActive)
+            _playlistItems[index].Status = shouldContinuePlaylist ? PlaylistStatusPlayed : PlaylistStatusReady;
+            if (shouldContinuePlaylist && _playlistPlaybackActive)
             {
-                nextToPlay = FindNextRepeatingPlaylistIndex(index, out endMarkerIndex);
+                nextToPlay = FindNextPlaylistRunIndex(index, out endMarkerIndex);
                 if (nextToPlay.HasValue)
                 {
                     _playlistItems[nextToPlay.Value].Status = PlaylistStatusNext;
@@ -5691,7 +5741,7 @@ internal sealed class MainForm : Form
         }
 
         var selectedAfterCompletion = nextToPlay ?? endMarkerIndex ?? index;
-        if (completedNormally &&
+        if (shouldContinuePlaylist &&
             nextToPlay.HasValue &&
             _playlistTransitionLeadInIndex == nextToPlay.Value)
         {
@@ -5703,27 +5753,79 @@ internal sealed class MainForm : Form
         }
 
         RefreshPlaylistGrid(selectedAfterCompletion);
-        if (completedNormally && _playlistPlaybackActive && nextToPlay.HasValue)
+        if (shouldContinuePlaylist && _playlistPlaybackActive && nextToPlay.HasValue)
         {
+            AppendPlaylistLog($"Playlist auto-next row {nextToPlay.Value + 1}: {Path.GetFileName(_playlistItems[nextToPlay.Value].FullPath)}.");
             QueuePlaylistAutoNext(nextToPlay.Value);
         }
-        else if (completedNormally && endMarkerIndex.HasValue)
+        else if (shouldContinuePlaylist && endMarkerIndex.HasValue)
         {
             _playlistPlaybackActive = false;
             UpdatePlaylistButtons();
             SetStatus("Playlist stopped at END marker", Color.FromArgb(232, 181, 105));
         }
-        else if (completedNormally && _playlistPlaybackActive)
+        else if (shouldContinuePlaylist && _playlistPlaybackActive)
         {
             _playlistPlaybackActive = false;
             UpdatePlaylistButtons();
             SetStatus("Playlist stopped", Color.FromArgb(130, 210, 164));
         }
-        else if (!completedNormally)
+        else
         {
             _playlistPlaybackActive = false;
             UpdatePlaylistButtons();
         }
+    }
+
+    private int? FindNextPlaylistRunIndex(int referenceIndex, out int? endMarkerIndex)
+    {
+        endMarkerIndex = null;
+        if (_playlistItems.Count == 0)
+        {
+            return null;
+        }
+
+        var startIndex = referenceIndex < 0 || referenceIndex >= _playlistItems.Count
+            ? 0
+            : (referenceIndex + 1) % _playlistItems.Count;
+        for (var offset = 0; offset < _playlistItems.Count; offset++)
+        {
+            var i = (startIndex + offset) % _playlistItems.Count;
+            if (i == referenceIndex)
+            {
+                continue;
+            }
+
+            var item = _playlistItems[i];
+            if (item.IsEndMarker)
+            {
+                AppendPlaylistLog($"Playlist next scan hit END at row {i + 1}.");
+                endMarkerIndex = i;
+                return null;
+            }
+
+            if (!item.PlayEnabled)
+            {
+                AppendPlaylistLog($"Playlist next scan skipped row {i + 1}: unchecked.");
+                continue;
+            }
+
+            if (!File.Exists(item.FullPath))
+            {
+                AppendPlaylistLog($"Playlist next scan skipped row {i + 1}: missing file.");
+                continue;
+            }
+
+            if (item.Status == PlaylistStatusPlayed)
+            {
+                AppendPlaylistLog($"Playlist next scan accepting row {i + 1} even though it was marked PLAYED.");
+            }
+
+            return i;
+        }
+
+        AppendPlaylistLog($"Playlist loop found no other checked existing rows after row {referenceIndex + 1}.");
+        return null;
     }
 
     private void QueuePlaylistAutoNext(int index)
@@ -5737,11 +5839,12 @@ internal sealed class MainForm : Form
         {
             try
             {
-                await PlayPlaylistItemAsync(index);
+                AppendPlaylistLog($"Playlist auto-next starting row {index + 1}.");
+                await PlayPlaylistItemAsync(index, fromAutoNext: true);
             }
             catch (Exception ex)
             {
-                AppendLog($"Auto next failed: {ex.Message}");
+                AppendPlaylistLog($"Auto next failed: {ex.Message}");
                 SetStatus("Auto next failed", Color.FromArgb(229, 113, 105));
             }
         }));
@@ -5919,8 +6022,6 @@ internal sealed class MainForm : Form
                 isEndMarker ? PlaylistEndMarkerText : GetMediaDisplayPath(item.FullPath),
                 !isEndMarker && duration.HasValue ? FormatPlaylistTime(duration.Value) : "--",
                 !isEndMarker && item.LoopEnabled,
-                isEndMarker ? PlaylistTransitionCut : NormalizePlaylistTransition(item.Transition),
-                isEndMarker || item.Transition == PlaylistTransitionCut ? "--" : FormatPlaylistTime(item.TransitionDuration),
                 endText,
                 item.FullPath);
 
@@ -5929,7 +6030,6 @@ internal sealed class MainForm : Form
             row.Cells["Clip"].ToolTipText = isEndMarker ? "Playlist stops here during repeat" : item.FullPath;
             row.Cells["PlayEnabled"].ReadOnly = isEndMarker;
             row.Cells["LoopEnabled"].ReadOnly = isEndMarker;
-            row.Cells["Transition"].ReadOnly = isEndMarker;
             ApplyPlaylistRowStyle(row, isEndMarker ? PlaylistStatusEnd : item.Status);
 
             if (isEndMarker)
@@ -5979,6 +6079,9 @@ internal sealed class MainForm : Form
                 item.Status = PlaylistStatusEnd;
                 continue;
             }
+
+            item.Transition = PlaylistTransitionCut;
+            item.TransitionDuration = DefaultTransitionDuration;
 
             if (!File.Exists(item.FullPath))
             {
@@ -6175,7 +6278,7 @@ internal sealed class MainForm : Form
             IsPlaylistRowCueable(selectedIndex.Value);
         var controlsEnabled = _playlistGrid.Enabled;
         _addToPlaylistButton.Enabled = controlsEnabled && (GetSelectedMediaGridPath() is not null || File.Exists(_inputPathBox.Text.Trim()));
-        _startPlaylistButton.Enabled = controlsEnabled && !_isPlaying && !_playlistPlaybackActive && hasPlaylistSelection && selectedPlayable;
+        _startPlaylistButton.Enabled = controlsEnabled && !_playlistPlaybackActive && hasPlaylistSelection && selectedPlayable;
         _stopPlaylistButton.Enabled = _playlistPlaybackActive;
         _playPlaylistItemButton.Enabled = controlsEnabled && !_playlistPlaybackActive && hasPlaylistSelection && selectedPlayable;
         _removePlaylistItemButton.Enabled = controlsEnabled && hasPlaylistSelection;
@@ -6214,7 +6317,7 @@ internal sealed class MainForm : Form
         ApplyButtonTheme(_clipPauseButton, _darkMode);
     }
 
-    private void UpdateTrimControls()
+    private void UpdateTrimControls(bool forceTextUpdate = false)
     {
         var path = _inputPathBox.Text.Trim();
         var hasMedia = !string.IsNullOrWhiteSpace(path) && File.Exists(path);
@@ -6225,6 +6328,8 @@ internal sealed class MainForm : Form
 
         _markInButton.Enabled = canMark;
         _markOutButton.Enabled = canMark;
+        _markInValueBox.Enabled = canSeekCommand;
+        _markOutValueBox.Enabled = canSeekCommand;
         _goToInButton.Enabled = canSeekCommand;
         _playFromInButton.Enabled = canSeekCommand;
         _goToTcButton.Enabled = canSeekCommand;
@@ -6236,13 +6341,26 @@ internal sealed class MainForm : Form
 
         if (TryGetCurrentTrimRange(out _, out var markIn, out var markOut, out _))
         {
-            _markInValueBox.Text = FormatPlaylistTime(markIn);
-            _markOutValueBox.Text = FormatPlaylistTime(markOut);
+            SetTrimTextBoxText(_markInValueBox, FormatPlaylistTime(markIn), forceTextUpdate);
+            SetTrimTextBoxText(_markOutValueBox, FormatPlaylistTime(markOut), forceTextUpdate);
         }
         else
         {
-            _markInValueBox.Text = "--";
-            _markOutValueBox.Text = "--";
+            SetTrimTextBoxText(_markInValueBox, "--", forceTextUpdate);
+            SetTrimTextBoxText(_markOutValueBox, "--", forceTextUpdate);
+        }
+    }
+
+    private static void SetTrimTextBoxText(TextBox textBox, string text, bool force)
+    {
+        if (!force && textBox.Focused)
+        {
+            return;
+        }
+
+        if (!string.Equals(textBox.Text, text, StringComparison.Ordinal))
+        {
+            textBox.Text = text;
         }
     }
 
@@ -9292,11 +9410,27 @@ internal sealed class MainForm : Form
     private static bool IsDeckLinkUnavailableException(Exception ex)
     {
         var text = ex.ToString();
-        return text.Contains("decklink", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("blackmagic", StringComparison.OrdinalIgnoreCase) ||
+        return text.Contains("DeckLink SDK device not found", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("DeckLink output unavailable", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Blackmagic", StringComparison.OrdinalIgnoreCase) ||
             text.Contains("No such device", StringComparison.OrdinalIgnoreCase) ||
             text.Contains("Cannot open video device", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("Could not open input", StringComparison.OrdinalIgnoreCase);
+            text.Contains("Could not open input", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("IDeckLinkOutput", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldRetryDeckLinkHandoff(Exception ex)
+    {
+        if (IsDeckLinkUnavailableException(ex))
+        {
+            return true;
+        }
+
+        var text = ex.ToString();
+        return ex is COMException ||
+            text.Contains("HRESULT", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("IDeckLinkOutput", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("interface", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FirstLine(string text)
@@ -9410,7 +9544,7 @@ internal sealed class MainForm : Form
             LogPlaybackLine(previewOnly ? "Preview-only decoder command:" : "SDK decoder command:");
             LogPlaybackLine(commandText);
 
-            var result = await Task.Run(
+            Task<ProcessResult> RunPlaybackEngineAsync() => Task.Run(
                 () => previewOnly
                     ? _sdkPlayer.PlayPreviewOnlyAsync(
                         request,
@@ -9434,6 +9568,20 @@ internal sealed class MainForm : Form
                         holdVideoOutputOnNaturalEnd: holdDeckLinkVideoForPlaylistAdvance),
                 _playbackCancellation.Token);
 
+            ProcessResult result;
+            try
+            {
+                result = await RunPlaybackEngineAsync();
+            }
+            catch (Exception ex) when (!previewOnly && ShouldRetryDeckLinkHandoff(ex))
+            {
+                AppendDeckLinkErrorLog("DeckLink playback start failed; retrying once with a fresh output.", ex);
+                LogPlaybackLine($"DeckLink handoff retry: {FirstLine(ex.Message)}");
+                DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
+                await Task.Delay(250, _playbackCancellation.Token);
+                result = await RunPlaybackEngineAsync();
+            }
+
             AppendLog(result.Cancelled
                 ? "Playback stopped."
                 : previewOnly
@@ -9451,11 +9599,13 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (!PreviewOnlyMode && IsDeckLinkUnavailableException(ex))
         {
+            AppendDeckLinkErrorLog("DeckLink playback failed and fallback was shown.", ex);
             ApplyDeckLinkUnavailableFallback($"DeckLink output unavailable. Preview-only mode is available. {FirstLine(ex.Message)}", clearDeckLinkSelection: false);
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
         }
         catch (Exception ex)
         {
+            AppendDeckLinkErrorLog("Playback failed.", ex);
             AppendLog($"Error: {ex.Message}");
             SetStatus("Error", Color.FromArgb(229, 113, 105));
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
@@ -9555,7 +9705,7 @@ internal sealed class MainForm : Form
             return true;
         }
 
-        return FindNextRepeatingPlaylistIndex(index, out _).HasValue;
+        return FindNextPlaylistRunIndex(index, out _).HasValue;
     }
 
     private async Task TogglePauseResumePlaybackAsync()
@@ -10620,6 +10770,26 @@ internal sealed class MainForm : Form
             $"ffmpeg_playout_{DateTime.Now:ddMMyy_HHmmss}.log");
     }
 
+    private static string GetPlaylistStateLogPath()
+    {
+        var logDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
+        Directory.CreateDirectory(logDirectory);
+
+        return Path.Combine(
+            logDirectory,
+            $"playlist_state_{DateTime.Now:yyyyMMdd}.log");
+    }
+
+    private static string GetDeckLinkErrorLogPath()
+    {
+        var logDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
+        Directory.CreateDirectory(logDirectory);
+
+        return Path.Combine(
+            logDirectory,
+            $"decklink_error_{DateTime.Now:yyyyMMdd}.log");
+    }
+
     private string GetSelectedDevice()
     {
         return _deviceBox.SelectedItem?.ToString()
@@ -10962,6 +11132,36 @@ internal sealed class MainForm : Form
 
         var prefix = string.IsNullOrEmpty(line) ? string.Empty : $"[{DateTime.Now:HH:mm:ss}] ";
         _logBox.AppendText(prefix + line + Environment.NewLine);
+    }
+
+    private void AppendPlaylistLog(string line)
+    {
+        AppendLog(line);
+
+        try
+        {
+            File.AppendAllText(
+                GetPlaylistStateLogPath(),
+                $"[{DateTime.Now:HH:mm:ss}] {line}{Environment.NewLine}");
+        }
+        catch
+        {
+            // UI log is still available if the file log cannot be written.
+        }
+    }
+
+    private void AppendDeckLinkErrorLog(string context, Exception ex)
+    {
+        try
+        {
+            File.AppendAllText(
+                GetDeckLinkErrorLogPath(),
+                $"[{DateTime.Now:HH:mm:ss}] {context}{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Playback should continue even if diagnostics cannot be persisted.
+        }
     }
 
     private sealed class PlaylistFile
