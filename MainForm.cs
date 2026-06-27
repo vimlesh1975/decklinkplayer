@@ -164,6 +164,7 @@ internal sealed class MainForm : Form
     private readonly TextBox _clearMediaSearchActionBox = new();
     private readonly Button _toggleSettingsButton = new();
     private readonly Button _toggleLogButton = new();
+    private readonly Button _fullscreenPreviewButton = new();
     private readonly CheckBox _previewOnlyCheckBox = new();
     private readonly CheckBox _pcAudioCheckBox = new();
     private readonly Button _refreshDevicesButton = new();
@@ -229,6 +230,7 @@ internal sealed class MainForm : Form
     private NativeDeckLinkPreviewOutput? _nativeSeekOutput;
     private NativeDeckLinkPreviewOutput? _scrubPreviewOutput;
     private PreviewFrameHelperClient? _scrubPreviewHelper;
+    private PreviewFullscreenForm? _fullscreenPreviewForm;
     private CancellationTokenSource? _scrubPreviewDecodeCancellation;
     private CancellationTokenSource? _reversePlaybackCancellation;
     private Task? _scrubPreviewStartTask;
@@ -378,6 +380,7 @@ internal sealed class MainForm : Form
             StopExternalFfplayProcesses();
             ExitNativeSeekPreviewMode(setStopped: false);
             ExitScrubPreviewMode(holdForReplacement: false, setStopped: false);
+            CloseFullscreenPreview();
             DisposeAppPreviewImage();
             DeckLinkSdkPlayer.ReleaseHeldVideoOutput();
             SaveAppSettings();
@@ -715,6 +718,7 @@ internal sealed class MainForm : Form
 
         SetButtonToolTip(_toggleSettingsButton, "Show or hide DeckLink output settings.");
         SetButtonToolTip(_toggleLogButton, "Show or hide the playback log.");
+        SetButtonToolTip(_fullscreenPreviewButton, "Show or hide the preview fullscreen on the second monitor.");
 
         SetButtonToolTip(_darkModeCheckBox, "Switch between dark and light mode.");
         SetButtonToolTip(_playbackModeLabel, "Shows whether playback is controlled manually or by the playlist.");
@@ -1572,6 +1576,12 @@ internal sealed class MainForm : Form
         StyleButton(_toggleLogButton, Color.FromArgb(52, 67, 82));
         _toggleLogButton.Click += (_, _) => SetLogVisible(!_logVisible);
 
+        _fullscreenPreviewButton.Text = "Full Preview";
+        _fullscreenPreviewButton.Width = 118;
+        _fullscreenPreviewButton.Margin = new Padding(0, 0, 6, 0);
+        StyleButton(_fullscreenPreviewButton, Color.FromArgb(52, 67, 82));
+        _fullscreenPreviewButton.Click += (_, _) => ToggleFullscreenPreview();
+
         _previewOnlyCheckBox.Text = "Preview only";
         _previewOnlyCheckBox.Checked = false;
         _previewOnlyCheckBox.AutoSize = false;
@@ -1594,6 +1604,7 @@ internal sealed class MainForm : Form
 
         panel.Controls.Add(_toggleSettingsButton);
         panel.Controls.Add(_toggleLogButton);
+        panel.Controls.Add(_fullscreenPreviewButton);
         panel.Controls.Add(_previewOnlyCheckBox);
 
         _pcAudioCheckBox.Text = "PC audio";
@@ -1606,6 +1617,67 @@ internal sealed class MainForm : Form
         _pcAudioCheckBox.CheckedChanged += (_, _) => SaveAppSettings();
         panel.Controls.Add(_pcAudioCheckBox);
         return panel;
+    }
+
+    private void ToggleFullscreenPreview()
+    {
+        if (_fullscreenPreviewForm is { IsDisposed: false })
+        {
+            CloseFullscreenPreview();
+            return;
+        }
+
+        OpenFullscreenPreview();
+    }
+
+    private void OpenFullscreenPreview()
+    {
+        var screen = Screen.AllScreens.FirstOrDefault(candidate => !candidate.Primary);
+        if (screen is null)
+        {
+            SetStatus("Second monitor not found.", Color.FromArgb(232, 181, 105));
+            return;
+        }
+
+        var form = new PreviewFullscreenForm();
+        _fullscreenPreviewForm = form;
+        form.FormClosed += (_, _) =>
+        {
+            if (ReferenceEquals(_fullscreenPreviewForm, form))
+            {
+                _fullscreenPreviewForm = null;
+            }
+
+            UpdateFullscreenPreviewButton();
+        };
+
+        form.Bounds = screen.Bounds;
+        form.Show(this);
+        form.Bounds = screen.Bounds;
+        form.SetPreviewImage(ClonePreviewImage(_appPreviewBox.Image));
+        UpdateFullscreenPreviewButton();
+        SetStatus($"Fullscreen preview on {screen.DeviceName}.", Color.FromArgb(130, 210, 164));
+    }
+
+    private void CloseFullscreenPreview()
+    {
+        var form = _fullscreenPreviewForm;
+        _fullscreenPreviewForm = null;
+
+        if (form is not null && !form.IsDisposed)
+        {
+            form.Close();
+        }
+
+        UpdateFullscreenPreviewButton();
+    }
+
+    private void UpdateFullscreenPreviewButton()
+    {
+        _fullscreenPreviewButton.Text = _fullscreenPreviewForm is { IsDisposed: false }
+            ? "Close Preview"
+            : "Full Preview";
+        ApplyButtonTheme(_fullscreenPreviewButton, _darkMode);
     }
 
     private Control BuildActionGroup(int height, params Control[] controls)
@@ -7767,10 +7839,49 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var previous = _appPreviewBox.Image;
-        _appPreviewBox.Image = bitmap;
-        previous?.Dispose();
-        Interlocked.Exchange(ref _appPreviewFramePending, 0);
+        try
+        {
+            var fullscreenImage = _fullscreenPreviewForm is { IsDisposed: false }
+                ? ClonePreviewImage(bitmap)
+                : null;
+            var previous = _appPreviewBox.Image;
+            _appPreviewBox.Image = bitmap;
+            previous?.Dispose();
+            UpdateFullscreenPreviewImage(fullscreenImage);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _appPreviewFramePending, 0);
+        }
+    }
+
+    private void UpdateFullscreenPreviewImage(Image? image)
+    {
+        var form = _fullscreenPreviewForm;
+        if (form is null || form.IsDisposed)
+        {
+            image?.Dispose();
+            return;
+        }
+
+        form.SetPreviewImage(image);
+    }
+
+    private static Image? ClonePreviewImage(Image? image)
+    {
+        if (image is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return (Image)image.Clone();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void DisposeAppPreviewImage()
@@ -11364,6 +11475,79 @@ internal sealed class MainForm : Form
             path.AddArc(rectangle.Left, rectangle.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             graphics.FillPath(brush, path);
+        }
+    }
+
+    private sealed class PreviewFullscreenForm : Form
+    {
+        private readonly PictureBox _previewBox = new();
+
+        public PreviewFullscreenForm()
+        {
+            Text = "DeckLink Player Preview";
+            StartPosition = FormStartPosition.Manual;
+            FormBorderStyle = FormBorderStyle.None;
+            WindowState = FormWindowState.Normal;
+            ShowInTaskbar = false;
+            TopMost = true;
+            KeyPreview = true;
+            BackColor = Color.Black;
+            Padding = new Padding(0);
+
+            _previewBox.Dock = DockStyle.Fill;
+            _previewBox.Margin = new Padding(0);
+            _previewBox.BackColor = Color.Black;
+            _previewBox.BorderStyle = BorderStyle.None;
+            _previewBox.SizeMode = PictureBoxSizeMode.Zoom;
+            Controls.Add(_previewBox);
+
+            KeyDown += (_, e) =>
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    e.Handled = true;
+                    Close();
+                }
+            };
+        }
+
+        public void SetPreviewImage(Image? image)
+        {
+            if (IsDisposed)
+            {
+                image?.Dispose();
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(() => SetPreviewImage(image));
+                }
+                catch
+                {
+                    image?.Dispose();
+                }
+
+                return;
+            }
+
+            var previous = _previewBox.Image;
+            _previewBox.Image = image;
+            previous?.Dispose();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                var image = _previewBox.Image;
+                _previewBox.Image = null;
+                image?.Dispose();
+            }
+
+            base.Dispose(disposing);
         }
     }
 
