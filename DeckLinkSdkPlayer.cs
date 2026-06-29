@@ -259,7 +259,7 @@ internal sealed class DeckLinkSdkPlayer
                 if (playbackPosition is not null &&
                     (frameNumber == 1 || (previewFrameInterval > 0 && frameNumber % previewFrameInterval == 0)))
                 {
-                    playbackPosition(request.StartOffset + TimeSpan.FromTicks(sourceFrameTime.Ticks * sourceFramesRead));
+                    playbackPosition(GetDisplayedSourcePosition(request.StartOffset, sourceFrameTime, sourceFramesRead));
                 }
 
                 if (shouldRenderInitialPausedFrame)
@@ -486,7 +486,7 @@ internal sealed class DeckLinkSdkPlayer
                 }
 
                 previewFrame?.Invoke(frameBuffer, width, height);
-                playbackPosition?.Invoke(request.StartOffset + TimeSpan.FromTicks(sourceFrameTime.Ticks * sourceFramesRead));
+                playbackPosition?.Invoke(GetDisplayedSourcePosition(request.StartOffset, sourceFrameTime, sourceFramesRead));
 
                 frameNumber++;
                 if (shouldRenderInitialPausedFrame)
@@ -590,6 +590,13 @@ internal sealed class DeckLinkSdkPlayer
 
         var deckLink = FindDeckLink(requestedDevice);
         return (deckLink, (IDeckLinkOutput_v14_2_1)deckLink, false);
+    }
+
+    private static TimeSpan GetDisplayedSourcePosition(TimeSpan startOffset, TimeSpan sourceFrameTime, long sourceFramesRead)
+    {
+        // sourceFramesRead counts consumed frames; the frame on screen is the last one consumed.
+        var displayedFrameIndex = Math.Max(0L, sourceFramesRead - 1);
+        return startOffset + TimeSpan.FromTicks(sourceFrameTime.Ticks * displayedFrameIndex);
     }
 
     private static bool TryValidateHeldVideoOutput(
