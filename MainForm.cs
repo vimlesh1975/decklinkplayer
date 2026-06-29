@@ -9523,6 +9523,7 @@ internal sealed class MainForm : Form
             var pcAudio = PcAudioMode;
             var request = BuildRequest(useTestPattern, startOffset ?? _selectedStartOffset, playDuration, playLoop, videoFilter, audioFilter, transitionSegment);
             var holdDeckLinkVideoForPlaylistAdvance = ShouldHoldDeckLinkVideoForPlaylistAdvance(previewOnly);
+            var holdDeckLinkVideoOnNaturalEnd = ShouldHoldDeckLinkVideoOnNaturalEnd(previewOnly, request, holdDeckLinkVideoForPlaylistAdvance);
             var commandText = _sdkPlayer.FormatDecoderCommand(
                 request,
                 throttleAudioRealtime: false,
@@ -9618,7 +9619,7 @@ internal sealed class MainForm : Form
                         previewFrameInterval: 5,
                         audioMeter: UpdateAudioMeters,
                         monitorPcAudio: pcAudio,
-                        holdVideoOutputOnNaturalEnd: holdDeckLinkVideoForPlaylistAdvance,
+                        holdVideoOutputOnNaturalEnd: holdDeckLinkVideoOnNaturalEnd,
                         playbackPosition: UpdatePlaybackPositionFromDecoder),
                 _playbackCancellation.Token);
 
@@ -9760,6 +9761,19 @@ internal sealed class MainForm : Form
         }
 
         return FindNextPlaylistRunIndex(index, out _).HasValue;
+    }
+
+    private static bool ShouldHoldDeckLinkVideoOnNaturalEnd(
+        bool previewOnly,
+        PlayRequest request,
+        bool holdForPlaylistAdvance)
+    {
+        if (previewOnly || request.UseTestPattern || request.Loop)
+        {
+            return false;
+        }
+
+        return holdForPlaylistAdvance || !string.IsNullOrWhiteSpace(request.InputPath);
     }
 
     private async Task TogglePauseResumePlaybackAsync()

@@ -659,7 +659,7 @@ internal sealed class DeckLinkSdkPlayer
             ReleaseHeldVideoOutput(previous);
         }
 
-        logLine?.Invoke("Holding last DeckLink frame during replacement playout.");
+        logLine?.Invoke("Holding last DeckLink frame.");
     }
 
     private static HeldVideoOutput? TakeHeldVideoOutput()
