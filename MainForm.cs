@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -54,6 +55,8 @@ internal sealed class MainForm : Form
     private static readonly TimeSpan ReverseDeckLinkRetryInterval = TimeSpan.FromMilliseconds(500);
     private const int AppPreviewWidth = 848;
     private const int AppPreviewHeight = 477;
+    private const int FullscreenPreviewMaxWidth = 1280;
+    private const int FullscreenPreviewMaxHeight = 720;
     private const int AppPreviewAreaHeight = AppPreviewHeight + RemainingTimeRowHeight + CurrentTimeRowHeight;
     private const int AppAudioMeterColumnWidth = 42;
     private const int AppAudioMeterPanelWidth = AppAudioMeterColumnWidth * 2;
@@ -78,6 +81,7 @@ internal sealed class MainForm : Form
 
     private readonly FfmpegDeckLink _deckLink = new();
     private readonly DeckLinkSdkPlayer _sdkPlayer = new();
+    private readonly object _appPreviewFrameGate = new();
     private readonly TextBox _inputPathBox = new();
     private readonly TextBox _mediaRootPathBox = new();
     private readonly TextBox _mediaSearchBox = new();
@@ -299,6 +303,11 @@ internal sealed class MainForm : Form
     private double _reversePlaybackFrameCarry;
     private DateTime? _reversePlaybackLastTickAt;
     private int _appPreviewFramePending;
+    private byte[]? _latestAppPreviewFrame;
+    private int _latestAppPreviewWidth;
+    private int _latestAppPreviewHeight;
+    private bool _appPreviewRenderWorkerRunning;
+    private DateTime _lastAppPreviewFrameQueuedAt = DateTime.MinValue;
     private bool _reverseSpeedSeekRunning;
     private ulong _lastSystemIdleTime;
     private ulong _lastSystemKernelTime;
@@ -1634,6 +1643,8 @@ internal sealed class MainForm : Form
             return;
         }
 
+        ForceFullscreenPreviewOutputModes();
+
         var form = new PreviewFullscreenForm();
         _fullscreenPreviewForm = form;
         form.FormClosed += (_, _) =>
@@ -1652,6 +1663,22 @@ internal sealed class MainForm : Form
         form.SetPreviewImage(ClonePreviewImage(_appPreviewBox.Image));
         UpdateFullscreenPreviewButton();
         SetStatus($"Fullscreen preview on {screen.DeviceName}.", Color.FromArgb(130, 210, 164));
+    }
+
+    private void ForceFullscreenPreviewOutputModes()
+    {
+        if (!_previewOnlyCheckBox.Checked)
+        {
+            _previewOnlyUserSet = true;
+            _previewOnlyCheckBox.Checked = true;
+        }
+
+        if (!_pcAudioCheckBox.Checked)
+        {
+            _pcAudioCheckBox.Checked = true;
+        }
+
+        SaveAppSettings();
     }
 
     private void CloseFullscreenPreview()
@@ -7968,28 +7995,120 @@ internal sealed class MainForm : Form
             return;
         }
 
-        if (Interlocked.Exchange(ref _appPreviewFramePending, 1) == 1)
+        var now = DateTime.UtcNow;
+        lock (_appPreviewFrameGate)
         {
-            return;
+            if (_appPreviewRenderWorkerRunning &&
+                (_latestAppPreviewFrame is not null || now - _lastAppPreviewFrameQueuedAt < TimeSpan.FromMilliseconds(20)))
+            {
+                return;
+            }
         }
 
         try
         {
-            var bitmap = CreatePreviewBitmap(uyvyFrame, width, height, AppPreviewWidth, AppPreviewHeight);
-            SetAppPreviewImage(bitmap);
+            var frameCopy = new byte[uyvyFrame.Length];
+            Buffer.BlockCopy(uyvyFrame, 0, frameCopy, 0, uyvyFrame.Length);
+            var shouldStartWorker = false;
+            lock (_appPreviewFrameGate)
+            {
+                _latestAppPreviewFrame = frameCopy;
+                _latestAppPreviewWidth = width;
+                _latestAppPreviewHeight = height;
+                _lastAppPreviewFrameQueuedAt = now;
+                if (!_appPreviewRenderWorkerRunning)
+                {
+                    _appPreviewRenderWorkerRunning = true;
+                    shouldStartWorker = true;
+                }
+            }
+
+            if (shouldStartWorker)
+            {
+                _ = Task.Run(ProcessAppPreviewFramesAsync);
+            }
         }
         catch (Exception ex)
         {
-            Interlocked.Exchange(ref _appPreviewFramePending, 0);
+            AppendLog($"App preview frame copy skipped: {ex.Message}");
+        }
+    }
+
+    private void ProcessAppPreviewFramesAsync()
+    {
+        while (true)
+        {
+            byte[]? frame;
+            int width;
+            int height;
+            lock (_appPreviewFrameGate)
+            {
+                frame = _latestAppPreviewFrame;
+                width = _latestAppPreviewWidth;
+                height = _latestAppPreviewHeight;
+                _latestAppPreviewFrame = null;
+                if (frame is null)
+                {
+                    _appPreviewRenderWorkerRunning = false;
+                    return;
+                }
+            }
+
+            RenderAppPreviewFrame(frame, width, height);
+        }
+    }
+
+    private void RenderAppPreviewFrame(byte[] uyvyFrame, int width, int height)
+    {
+        Bitmap? bitmap = null;
+        Bitmap? fullscreenBitmap = null;
+        try
+        {
+            bitmap = CreatePreviewBitmap(uyvyFrame, width, height, AppPreviewWidth, AppPreviewHeight);
+            if (_fullscreenPreviewForm is { IsDisposed: false })
+            {
+                var fullscreenSize = GetFullscreenPreviewBitmapSize(width, height);
+                fullscreenBitmap = CreatePreviewBitmap(
+                    uyvyFrame,
+                    width,
+                    height,
+                    fullscreenSize.Width,
+                    fullscreenSize.Height);
+            }
+
+            SetAppPreviewImage(bitmap, fullscreenBitmap);
+            bitmap = null;
+            fullscreenBitmap = null;
+        }
+        catch (Exception ex)
+        {
+            bitmap?.Dispose();
+            fullscreenBitmap?.Dispose();
             AppendLog($"App preview frame skipped: {ex.Message}");
         }
     }
 
-    private void SetAppPreviewImage(Bitmap bitmap)
+    private static Size GetFullscreenPreviewBitmapSize(int sourceWidth, int sourceHeight)
+    {
+        if (sourceWidth <= FullscreenPreviewMaxWidth && sourceHeight <= FullscreenPreviewMaxHeight)
+        {
+            return new Size(sourceWidth, sourceHeight);
+        }
+
+        var scale = Math.Min(
+            FullscreenPreviewMaxWidth / (double)Math.Max(1, sourceWidth),
+            FullscreenPreviewMaxHeight / (double)Math.Max(1, sourceHeight));
+        return new Size(
+            Math.Max(1, (int)Math.Round(sourceWidth * scale)),
+            Math.Max(1, (int)Math.Round(sourceHeight * scale)));
+    }
+
+    private void SetAppPreviewImage(Bitmap bitmap, Bitmap? fullscreenBitmap)
     {
         if (IsDisposed)
         {
             bitmap.Dispose();
+            fullscreenBitmap?.Dispose();
             Interlocked.Exchange(ref _appPreviewFramePending, 0);
             return;
         }
@@ -7998,11 +8117,12 @@ internal sealed class MainForm : Form
         {
             try
             {
-                BeginInvoke(() => SetAppPreviewImage(bitmap));
+                BeginInvoke(() => SetAppPreviewImage(bitmap, fullscreenBitmap));
             }
             catch
             {
                 bitmap.Dispose();
+                fullscreenBitmap?.Dispose();
                 Interlocked.Exchange(ref _appPreviewFramePending, 0);
             }
 
@@ -8011,13 +8131,10 @@ internal sealed class MainForm : Form
 
         try
         {
-            var fullscreenImage = _fullscreenPreviewForm is { IsDisposed: false }
-                ? ClonePreviewImage(bitmap)
-                : null;
             var previous = _appPreviewBox.Image;
             _appPreviewBox.Image = bitmap;
             previous?.Dispose();
-            UpdateFullscreenPreviewImage(fullscreenImage);
+            UpdateFullscreenPreviewImage(fullscreenBitmap);
         }
         finally
         {
@@ -8097,7 +8214,7 @@ internal sealed class MainForm : Form
         meter.Dbfs = dbfs;
     }
 
-    private static Bitmap CreatePreviewBitmap(byte[] uyvyFrame, int sourceWidth, int sourceHeight, int previewWidth, int previewHeight)
+    private static unsafe Bitmap CreatePreviewBitmap(byte[] uyvyFrame, int sourceWidth, int sourceHeight, int previewWidth, int previewHeight)
     {
         if (uyvyFrame.Length < checked(sourceWidth * sourceHeight * 2))
         {
@@ -8109,29 +8226,58 @@ internal sealed class MainForm : Form
         var data = bitmap.LockBits(bounds, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
         try
         {
-            var rgb = new byte[data.Stride * previewHeight];
-            for (var y = 0; y < previewHeight; y++)
+            var destinationBase = (byte*)data.Scan0;
+            fixed (byte* sourceBase = uyvyFrame)
             {
-                var sourceY = Math.Min(sourceHeight - 1, y * sourceHeight / previewHeight);
-                var rowOffset = y * data.Stride;
-                for (var x = 0; x < previewWidth; x++)
+                if (sourceWidth == previewWidth && sourceHeight == previewHeight && (sourceWidth & 1) == 0)
                 {
-                    var sourceX = Math.Min(sourceWidth - 1, x * sourceWidth / previewWidth);
-                    var pairX = sourceX & ~1;
-                    var sourceOffset = (sourceY * sourceWidth + pairX) * 2;
-                    var u = uyvyFrame[sourceOffset];
-                    var v = uyvyFrame[sourceOffset + 2];
-                    var yValue = uyvyFrame[sourceOffset + (sourceX == pairX ? 1 : 3)];
-                    ConvertYuvToRgb(yValue, u, v, out var r, out var g, out var b);
+                    for (var y = 0; y < previewHeight; y++)
+                    {
+                        var sourceRow = sourceBase + y * sourceWidth * 2;
+                        var destinationRow = destinationBase + y * data.Stride;
+                        for (var x = 0; x < previewWidth; x += 2)
+                        {
+                            var source = sourceRow + x * 2;
+                            var destination = destinationRow + x * 3;
+                            var u = source[0];
+                            var y0 = source[1];
+                            var v = source[2];
+                            var y1 = source[3];
+                            ConvertYuvToRgb(y0, u, v, out var r0, out var g0, out var b0);
+                            ConvertYuvToRgb(y1, u, v, out var r1, out var g1, out var b1);
+                            destination[0] = b0;
+                            destination[1] = g0;
+                            destination[2] = r0;
+                            destination[3] = b1;
+                            destination[4] = g1;
+                            destination[5] = r1;
+                        }
+                    }
+                }
+                else
+                {
+                    for (var y = 0; y < previewHeight; y++)
+                    {
+                        var sourceY = Math.Min(sourceHeight - 1, y * sourceHeight / previewHeight);
+                        var destinationRow = destinationBase + y * data.Stride;
+                        for (var x = 0; x < previewWidth; x++)
+                        {
+                            var sourceX = Math.Min(sourceWidth - 1, x * sourceWidth / previewWidth);
+                            var pairX = sourceX & ~1;
+                            var source = sourceBase + (sourceY * sourceWidth + pairX) * 2;
+                            var u = source[0];
+                            var v = source[2];
+                            var yValue = source[sourceX == pairX ? 1 : 3];
+                            ConvertYuvToRgb(yValue, u, v, out var r, out var g, out var b);
 
-                    var destination = rowOffset + x * 3;
-                    rgb[destination] = b;
-                    rgb[destination + 1] = g;
-                    rgb[destination + 2] = r;
+                            var destination = destinationRow + x * 3;
+                            destination[0] = b;
+                            destination[1] = g;
+                            destination[2] = r;
+                        }
+                    }
                 }
             }
-
-            Marshal.Copy(rgb, 0, data.Scan0, rgb.Length);
         }
         catch
         {
@@ -8149,9 +8295,9 @@ internal sealed class MainForm : Form
         var c = yValue - 16;
         var d = uValue - 128;
         var e = vValue - 128;
-        r = ClampToByte((298 * c + 409 * e + 128) >> 8);
-        g = ClampToByte((298 * c - 100 * d - 208 * e + 128) >> 8);
-        b = ClampToByte((298 * c + 516 * d + 128) >> 8);
+        r = ClampToByte((298 * c + 459 * e + 128) >> 8);
+        g = ClampToByte((298 * c - 55 * d - 136 * e + 128) >> 8);
+        b = ClampToByte((298 * c + 541 * d + 128) >> 8);
     }
 
     private static byte ClampToByte(int value)
@@ -9616,7 +9762,7 @@ internal sealed class MainForm : Form
                         pauseController,
                         renderInitialFrameWhilePaused: startPaused,
                         previewFrame: UpdateAppPreviewFrame,
-                        previewFrameInterval: 5,
+                        previewFrameInterval: 1,
                         audioMeter: UpdateAudioMeters,
                         monitorPcAudio: pcAudio,
                         holdVideoOutputOnNaturalEnd: holdDeckLinkVideoOnNaturalEnd,
@@ -11748,7 +11894,7 @@ internal sealed class MainForm : Form
 
     private sealed class PreviewFullscreenForm : Form
     {
-        private readonly PictureBox _previewBox = new();
+        private readonly FullscreenPreviewSurface _previewSurface = new();
 
         public PreviewFullscreenForm()
         {
@@ -11762,12 +11908,9 @@ internal sealed class MainForm : Form
             BackColor = Color.Black;
             Padding = new Padding(0);
 
-            _previewBox.Dock = DockStyle.Fill;
-            _previewBox.Margin = new Padding(0);
-            _previewBox.BackColor = Color.Black;
-            _previewBox.BorderStyle = BorderStyle.None;
-            _previewBox.SizeMode = PictureBoxSizeMode.Zoom;
-            Controls.Add(_previewBox);
+            _previewSurface.Dock = DockStyle.Fill;
+            _previewSurface.Margin = new Padding(0);
+            Controls.Add(_previewSurface);
 
             KeyDown += (_, e) =>
             {
@@ -11801,21 +11944,93 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            var previous = _previewBox.Image;
-            _previewBox.Image = image;
-            previous?.Dispose();
+            _previewSurface.SetPreviewImage(image);
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                var image = _previewBox.Image;
-                _previewBox.Image = null;
-                image?.Dispose();
+                _previewSurface.ClearPreviewImage();
             }
 
             base.Dispose(disposing);
+        }
+    }
+
+    private sealed class FullscreenPreviewSurface : Control
+    {
+        private Image? _image;
+
+        public FullscreenPreviewSurface()
+        {
+            BackColor = Color.Black;
+            SetStyle(
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.UserPaint |
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.ResizeRedraw,
+                true);
+            UpdateStyles();
+        }
+
+        public void SetPreviewImage(Image? image)
+        {
+            var previous = _image;
+            _image = image;
+            previous?.Dispose();
+            Invalidate();
+        }
+
+        public void ClearPreviewImage()
+        {
+            var previous = _image;
+            _image = null;
+            previous?.Dispose();
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Color.Black);
+
+            var image = _image;
+            if (image is null || image.Width <= 0 || image.Height <= 0 || ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            {
+                return;
+            }
+
+            var destination = GetLetterboxedRectangle(image.Size, ClientRectangle);
+            e.Graphics.CompositingQuality = CompositingQuality.HighQuality;
+            e.Graphics.InterpolationMode = destination.Size == image.Size
+                ? InterpolationMode.NearestNeighbor
+                : InterpolationMode.HighQualityBicubic;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            e.Graphics.SmoothingMode = SmoothingMode.None;
+            e.Graphics.DrawImage(image, destination);
+        }
+
+        private static Rectangle GetLetterboxedRectangle(Size imageSize, Rectangle bounds)
+        {
+            var imageAspect = imageSize.Width / (double)imageSize.Height;
+            var boundsAspect = bounds.Width / (double)bounds.Height;
+            int width;
+            int height;
+
+            if (boundsAspect > imageAspect)
+            {
+                height = bounds.Height;
+                width = (int)Math.Round(height * imageAspect);
+            }
+            else
+            {
+                width = bounds.Width;
+                height = (int)Math.Round(width / imageAspect);
+            }
+
+            var x = bounds.Left + (bounds.Width - width) / 2;
+            var y = bounds.Top + (bounds.Height - height) / 2;
+            return new Rectangle(x, y, Math.Max(1, width), Math.Max(1, height));
         }
     }
 
