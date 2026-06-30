@@ -216,6 +216,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _reversePlaybackSpeedTimer = new() { Interval = 120 };
     private readonly System.Windows.Forms.Timer _reverseDeckLinkFrameTimer = new() { Interval = 40 };
     private readonly System.Windows.Forms.Timer _cpuUsageTimer = new() { Interval = 1000 };
+    private readonly System.Windows.Forms.Timer _externalShuttleReturnTimer = new() { Interval = 650 };
 
     private TableLayoutPanel? _settingsSplit;
     private TableLayoutPanel? _detailsPanelLayout;
@@ -309,6 +310,7 @@ internal sealed class MainForm : Form
     private double _reversePlaybackSpeed;
     private double _reversePlaybackFrameCarry;
     private DateTime? _reversePlaybackLastTickAt;
+    private DateTime? _externalShuttleLastInputAt;
     private int _appPreviewFramePending;
     private byte[]? _latestAppPreviewFrame;
     private int _latestAppPreviewWidth;
@@ -316,6 +318,7 @@ internal sealed class MainForm : Form
     private bool _appPreviewRenderWorkerRunning;
     private DateTime _lastAppPreviewFrameQueuedAt = DateTime.MinValue;
     private bool _reverseSpeedSeekRunning;
+    private bool _externalShuttleReturnRunning;
     private ulong _lastSystemIdleTime;
     private ulong _lastSystemKernelTime;
     private ulong _lastSystemUserTime;
@@ -357,6 +360,7 @@ internal sealed class MainForm : Form
         _scrubSeekTimer.Tick += ScrubSeekTimer_Tick;
         _reversePlaybackSpeedTimer.Tick += async (_, _) => await ReversePlaybackSpeedTimer_TickAsync();
         _reverseDeckLinkFrameTimer.Tick += (_, _) => ReverseDeckLinkFrameTimer_Tick();
+        _externalShuttleReturnTimer.Tick += async (_, _) => await ExternalShuttleReturnTimer_TickAsync();
         KeyDown += MainForm_KeyDown;
         InitializeCpuUsageSampling();
         _cpuUsageTimer.Tick += (_, _) => UpdateCpuUsageLabel();
@@ -382,6 +386,7 @@ internal sealed class MainForm : Form
             _mediaGridMetadataCancellation?.Cancel();
             _scrubSeekTimer.Stop();
             _reverseDeckLinkFrameTimer.Stop();
+            _externalShuttleReturnTimer.Stop();
             _cpuUsageTimer.Stop();
             DisposeCpuUsageSampling();
             StopExternalFfplayProcesses();
@@ -404,6 +409,22 @@ internal sealed class MainForm : Form
         base.Dispose(disposing);
     }
 
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        var keyCode = keyData & Keys.KeyCode;
+        if (keyCode is Keys.Left or Keys.Right && !IsTextEntryFocused())
+        {
+            var args = new KeyEventArgs(keyData);
+            if (TryGetSeekShortcut(args, out var frameDelta, out var timeDelta))
+            {
+                _ = RunSeekShortcutAsync(frameDelta, timeDelta);
+                return true;
+            }
+        }
+
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
     private async void MainForm_KeyDown(object? sender, KeyEventArgs e)
     {
         if (await TryHandleKeyboardShortcutAsync(e))
@@ -418,6 +439,7 @@ internal sealed class MainForm : Form
         if (TryGetExactShuttleSpeedShortcut(e, out var exactSpeed))
         {
             await SetPlaybackSpeedAsync(exactSpeed);
+            RegisterExternalShuttleInput(exactSpeed);
             return true;
         }
 
@@ -511,19 +533,23 @@ internal sealed class MainForm : Form
 
         if (TryGetSeekShortcut(e, out var frameDelta, out var timeDelta))
         {
-            if (frameDelta.HasValue)
-            {
-                await RunSeekSafelyAsync(() => SeekRelativeFramesAsync(frameDelta.Value));
-            }
-            else if (timeDelta.HasValue)
-            {
-                await RunSeekSafelyAsync(() => SeekRelativeAsync(timeDelta.Value));
-            }
-
+            await RunSeekShortcutAsync(frameDelta, timeDelta);
             return true;
         }
 
         return false;
+    }
+
+    private async Task RunSeekShortcutAsync(int? frameDelta, TimeSpan? timeDelta)
+    {
+        if (frameDelta.HasValue)
+        {
+            await RunSeekSafelyAsync(() => SeekRelativeFramesAsync(frameDelta.Value));
+        }
+        else if (timeDelta.HasValue)
+        {
+            await RunSeekSafelyAsync(() => SeekRelativeAsync(timeDelta.Value));
+        }
     }
 
     private static bool TryGetExactShuttleSpeedShortcut(KeyEventArgs e, out double speed)
@@ -635,6 +661,56 @@ internal sealed class MainForm : Form
         }
 
         await SetPlaybackSpeedAsync(nextSpeed);
+    }
+
+    private void RegisterExternalShuttleInput(double speed)
+    {
+        if (Math.Abs(speed) < 0.001d)
+        {
+            _externalShuttleLastInputAt = null;
+            _externalShuttleReturnTimer.Stop();
+            return;
+        }
+
+        _externalShuttleLastInputAt = DateTime.UtcNow;
+        if (!_externalShuttleReturnTimer.Enabled)
+        {
+            _externalShuttleReturnTimer.Start();
+        }
+    }
+
+    private async Task ExternalShuttleReturnTimer_TickAsync()
+    {
+        if (_externalShuttleReturnRunning)
+        {
+            return;
+        }
+
+        if (!_externalShuttleLastInputAt.HasValue)
+        {
+            _externalShuttleReturnTimer.Stop();
+            return;
+        }
+
+        if (DateTime.UtcNow - _externalShuttleLastInputAt.Value < TimeSpan.FromMilliseconds(_externalShuttleReturnTimer.Interval))
+        {
+            return;
+        }
+
+        _externalShuttleReturnRunning = true;
+        try
+        {
+            _externalShuttleLastInputAt = null;
+            _externalShuttleReturnTimer.Stop();
+            if (Math.Abs(_selectedPlaybackSpeed) > 0.001d)
+            {
+                await SetPlaybackSpeedAsync(0d);
+            }
+        }
+        finally
+        {
+            _externalShuttleReturnRunning = false;
+        }
     }
 
     private bool IsTextEntryFocused()
@@ -10247,6 +10323,28 @@ internal sealed class MainForm : Form
         }
 
         CapturePlaybackClockProgress();
+        if (Math.Abs(speed - _selectedPlaybackSpeed) < 0.001d)
+        {
+            if (speed < 0d && _reversePlaybackSpeed < 0d)
+            {
+                return;
+            }
+
+            if (speed > 0d &&
+                _isPlaying &&
+                !_isPaused &&
+                _playbackPauseController is not null &&
+                Math.Abs(_playbackPauseController.PlaybackSpeed - speed) < 0.001d)
+            {
+                return;
+            }
+
+            if (Math.Abs(speed) < 0.001d && (_isPaused || _scrubPreviewMode || _nativeSeekPreviewMode))
+            {
+                return;
+            }
+        }
+
         _selectedPlaybackSpeed = speed;
         UpdatePlaybackSpeedButtons(CanUsePlaybackSpeed());
 

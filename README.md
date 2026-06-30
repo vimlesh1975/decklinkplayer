@@ -131,6 +131,21 @@ Exact ShuttlePRO ring speed shortcuts:
 - `Ctrl+Alt+1` to `Ctrl+Alt+9`: `+0.25x`, `+0.50x`, `+0.75x`, `+1x`, `+1.5x`, `+2x`, `+5x`, `+10x`, `+20x`
 - `Ctrl+Shift+0` or `Ctrl+Alt+0`: `0x`
 
+The generated ShuttlePRO v2 profile maps the physical ring to the practical 7-position speeds:
+
+- Reverse: `-0.25x`, `-0.50x`, `-1x`, `-2x`, `-5x`, `-10x`, `-20x`
+- Forward: `+0.25x`, `+0.50x`, `+1x`, `+2x`, `+5x`, `+10x`, `+20x`
+- The farther you rotate the ring, the faster the shuttle speed becomes.
+- When the ring is released/centered, the app auto-returns to `0x`.
+
+Regenerate and install the profile:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\tools\Create-ShuttleProV2Profile.ps1
+```
+
+The script creates `ShuttleProfiles\DeckLinkPlayer.pref`, backs up the Contour active database, inserts a `DeckLinkPlayer` profile for `decklinkplayer_*.exe`, and restarts the Contour helper.
+
 ## Settings
 
 Settings are saved here:
