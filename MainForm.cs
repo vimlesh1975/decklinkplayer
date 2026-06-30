@@ -82,6 +82,8 @@ internal sealed class MainForm : Form
         0d,
         0.25d, 0.5d, 0.75d, 1d, 1.5d, 2d, 5d, 10d, 20d,
     ];
+    private static readonly double[] ReverseShuttleSpeeds = [-0.25d, -0.5d, -0.75d, -1d, -1.5d, -2d, -5d, -10d, -20d];
+    private static readonly double[] ForwardShuttleSpeeds = [0.25d, 0.5d, 0.75d, 1d, 1.5d, 2d, 5d, 10d, 20d];
     private static readonly JsonSerializerOptions PlaylistJsonOptions = new() { WriteIndented = true };
 
     private readonly FfmpegDeckLink _deckLink = new();
@@ -404,41 +406,266 @@ internal sealed class MainForm : Form
 
     private async void MainForm_KeyDown(object? sender, KeyEventArgs e)
     {
+        if (await TryHandleKeyboardShortcutAsync(e))
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
+    }
+
+    private async Task<bool> TryHandleKeyboardShortcutAsync(KeyEventArgs e)
+    {
+        if (TryGetExactShuttleSpeedShortcut(e, out var exactSpeed))
+        {
+            await SetPlaybackSpeedAsync(exactSpeed);
+            return true;
+        }
+
         switch (e.KeyCode)
         {
             case Keys.F1:
-                e.Handled = true;
                 StopPlayback();
-                break;
+                return true;
             case Keys.F2:
-                e.Handled = true;
                 await PlaySelectedPlaylistItemAsync();
-                break;
+                return true;
             case Keys.F3:
-                e.Handled = true;
                 CueSelectedPlaylistItem();
-                break;
+                return true;
             case Keys.F4:
-                e.Handled = true;
-                if (_isPaused)
-                {
-                    ResumePlayback();
-                }
-                else
-                {
-                    PausePlayback();
-                }
-
-                break;
+                await TogglePauseResumePlaybackAsync();
+                return true;
             case Keys.F5:
-                e.Handled = true;
                 CueRelativePlaylistItem(1);
-                break;
+                return true;
             case Keys.F6:
-                e.Handled = true;
                 await PlayRelativePlaylistItemAsync(1);
-                break;
+                return true;
+            case Keys.F7:
+                MarkTrimIn();
+                return true;
+            case Keys.F8:
+                MarkTrimOut();
+                return true;
+            case Keys.F9:
+                await RunSeekSafelyAsync(GoToInAsync);
+                return true;
+            case Keys.F10:
+                await RunSeekSafelyAsync(GoToOutAsync);
+                return true;
+            case Keys.F11:
+                await PlayRelativePlaylistItemAsync(-1);
+                return true;
+            case Keys.F12:
+                await PlayRelativePlaylistItemAsync(1);
+                return true;
         }
+
+        if (IsTextEntryFocused())
+        {
+            return false;
+        }
+
+        if (e.Control && !e.Alt && !e.Shift && e.KeyCode == Keys.Enter)
+        {
+            await PlaySelectedMediaGridAsync();
+            return true;
+        }
+
+        if (e.KeyCode == Keys.Escape)
+        {
+            StopPlayback();
+            return true;
+        }
+
+        if (!e.Control && !e.Alt && !e.Shift)
+        {
+            switch (e.KeyCode)
+            {
+                case Keys.Space:
+                    await TogglePauseResumePlaybackAsync();
+                    return true;
+                case Keys.J:
+                    await StepShuttleSpeedAsync(ReverseShuttleSpeeds);
+                    return true;
+                case Keys.K:
+                    await SetPlaybackSpeedAsync(0d);
+                    return true;
+                case Keys.L:
+                    await StepShuttleSpeedAsync(ForwardShuttleSpeeds);
+                    return true;
+                case Keys.I:
+                    MarkTrimIn();
+                    return true;
+                case Keys.O:
+                    MarkTrimOut();
+                    return true;
+                case Keys.Home:
+                    await RunSeekSafelyAsync(GoToInAsync);
+                    return true;
+                case Keys.End:
+                    await RunSeekSafelyAsync(GoToOutAsync);
+                    return true;
+            }
+        }
+
+        if (TryGetSeekShortcut(e, out var frameDelta, out var timeDelta))
+        {
+            if (frameDelta.HasValue)
+            {
+                await RunSeekSafelyAsync(() => SeekRelativeFramesAsync(frameDelta.Value));
+            }
+            else if (timeDelta.HasValue)
+            {
+                await RunSeekSafelyAsync(() => SeekRelativeAsync(timeDelta.Value));
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetExactShuttleSpeedShortcut(KeyEventArgs e, out double speed)
+    {
+        speed = 0d;
+        var digit = GetShortcutDigit(e.KeyCode);
+        if (!digit.HasValue)
+        {
+            return false;
+        }
+
+        if (e.Control && e.Alt && !e.Shift)
+        {
+            speed = digit.Value switch
+            {
+                0 => 0d,
+                1 => 0.25d,
+                2 => 0.5d,
+                3 => 0.75d,
+                4 => 1d,
+                5 => 1.5d,
+                6 => 2d,
+                7 => 5d,
+                8 => 10d,
+                9 => 20d,
+                _ => 0d,
+            };
+            return true;
+        }
+
+        if (e.Control && e.Shift && !e.Alt)
+        {
+            speed = digit.Value switch
+            {
+                0 => 0d,
+                1 => -0.25d,
+                2 => -0.5d,
+                3 => -0.75d,
+                4 => -1d,
+                5 => -1.5d,
+                6 => -2d,
+                7 => -5d,
+                8 => -10d,
+                9 => -20d,
+                _ => 0d,
+            };
+            return true;
+        }
+
+        return false;
+    }
+
+    private static int? GetShortcutDigit(Keys keyCode)
+    {
+        if (keyCode is >= Keys.D0 and <= Keys.D9)
+        {
+            return keyCode - Keys.D0;
+        }
+
+        if (keyCode is >= Keys.NumPad0 and <= Keys.NumPad9)
+        {
+            return keyCode - Keys.NumPad0;
+        }
+
+        return null;
+    }
+
+    private static bool TryGetSeekShortcut(KeyEventArgs e, out int? frameDelta, out TimeSpan? timeDelta)
+    {
+        frameDelta = null;
+        timeDelta = null;
+        if (e.KeyCode is not Keys.Left and not Keys.Right)
+        {
+            return false;
+        }
+
+        var direction = e.KeyCode == Keys.Left ? -1 : 1;
+        if (!e.Control && !e.Alt)
+        {
+            frameDelta = direction * (e.Shift ? 5 : 1);
+            return true;
+        }
+
+        if (e.Control && !e.Alt && !e.Shift)
+        {
+            frameDelta = direction * 10;
+            return true;
+        }
+
+        if (e.Alt && !e.Control && !e.Shift)
+        {
+            timeDelta = TimeSpan.FromSeconds(direction);
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task StepShuttleSpeedAsync(double[] speeds)
+    {
+        var nextSpeed = speeds[0];
+        for (var i = 0; i < speeds.Length; i++)
+        {
+            if (Math.Abs(_selectedPlaybackSpeed - speeds[i]) < 0.001d)
+            {
+                nextSpeed = speeds[Math.Min(i + 1, speeds.Length - 1)];
+                break;
+            }
+        }
+
+        await SetPlaybackSpeedAsync(nextSpeed);
+    }
+
+    private bool IsTextEntryFocused()
+    {
+        var focused = FindFocusedControl(this);
+        return focused is TextBoxBase or NumericUpDown or ComboBox ||
+            focused?.Parent is NumericUpDown;
+    }
+
+    private static Control? FindFocusedControl(Control root)
+    {
+        if (root.Focused)
+        {
+            return root;
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            if (!child.ContainsFocus)
+            {
+                continue;
+            }
+
+            var focusedChild = FindFocusedControl(child);
+            if (focusedChild is not null)
+            {
+                return focusedChild;
+            }
+        }
+
+        return null;
     }
 
     private static string GetExecutableWindowTitle()

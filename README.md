@@ -97,6 +97,40 @@ Example:
 5. Use SDI embedded audio to judge lip sync.
 6. Use `Preview only` if you want local preview without DeckLink output.
 
+## Keyboard And ShuttlePRO v2 Mapping
+
+The app has keyboard shortcuts that can be mapped from Contour ShuttlePRO v2.
+
+General transport:
+
+- `F1` or `Esc`: stop
+- `F2`: play selected playlist row
+- `F3`: cue selected playlist row
+- `F4` or `Space`: pause/resume
+- `F5`: cue next playlist row
+- `F6`: play next playlist row
+- `Ctrl+Enter`: play selected media-library clip
+- `J`: step reverse shuttle speed
+- `K`: 0x pause
+- `L`: step forward shuttle speed
+
+Seek and marks:
+
+- `Left` / `Right`: -1 / +1 frame
+- `Shift+Left` / `Shift+Right`: -5 / +5 frames
+- `Ctrl+Left` / `Ctrl+Right`: -10 / +10 frames
+- `Alt+Left` / `Alt+Right`: -1 / +1 second
+- `I` / `O`: mark IN / mark OUT
+- `Home` / `End`: go to IN / go to OUT
+- `F7` / `F8`: mark IN / mark OUT
+- `F9` / `F10`: go to IN / go to OUT
+
+Exact ShuttlePRO ring speed shortcuts:
+
+- `Ctrl+Shift+1` to `Ctrl+Shift+9`: `-0.25x`, `-0.50x`, `-0.75x`, `-1x`, `-1.5x`, `-2x`, `-5x`, `-10x`, `-20x`
+- `Ctrl+Alt+1` to `Ctrl+Alt+9`: `+0.25x`, `+0.50x`, `+0.75x`, `+1x`, `+1.5x`, `+2x`, `+5x`, `+10x`, `+20x`
+- `Ctrl+Shift+0` or `Ctrl+Alt+0`: `0x`
+
 ## Settings
 
 Settings are saved here:
