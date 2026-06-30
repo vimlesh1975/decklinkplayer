@@ -76,7 +76,12 @@ internal sealed class MainForm : Form
     private const bool EnableInProcessNativeSeekPreview = false;
     private static readonly TimeSpan DefaultStillDuration = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DefaultTransitionDuration = TimeSpan.FromSeconds(1);
-    private static readonly double[] PlaybackSpeedOptions = [-20d, -10d, -5d, -2d, -1.5d, -1d, 0d, 1d, 1.5d, 2d, 5d, 10d, 20d];
+    private static readonly double[] PlaybackSpeedOptions =
+    [
+        -20d, -10d, -5d, -2d, -1.5d, -1d, -0.75d, -0.5d, -0.25d,
+        0d,
+        0.25d, 0.5d, 0.75d, 1d, 1.5d, 2d, 5d, 10d, 20d,
+    ];
     private static readonly JsonSerializerOptions PlaylistJsonOptions = new() { WriteIndented = true };
 
     private readonly FfmpegDeckLink _deckLink = new();
@@ -1748,25 +1753,38 @@ internal sealed class MainForm : Form
         {
             Text = FormatPlaybackSpeedButtonText(speed),
             Tag = speed,
-            Width = Math.Abs(speed) >= 10d ? 56 : Math.Abs(speed) == 1.5d ? 58 : 48,
+            Width = GetPlaybackSpeedButtonWidth(speed),
             Height = 31,
-            Margin = new Padding(0, 0, 5, 0),
+            Margin = new Padding(0, 0, 2, 0),
             TextAlign = ContentAlignment.MiddleCenter,
             UseVisualStyleBackColor = false,
             Enabled = false,
         };
+        button.Font = new Font(button.Font.FontFamily, 8.25f, button.Font.Style);
         StyleButton(button, Color.FromArgb(52, 67, 82));
         button.Click += async (_, _) => await SetPlaybackSpeedAsync(speed);
         return button;
     }
 
+    private static int GetPlaybackSpeedButtonWidth(double speed)
+    {
+        var absoluteSpeed = Math.Abs(speed);
+        if (absoluteSpeed < 0.001d)
+        {
+            return 34;
+        }
+
+        return absoluteSpeed < 1d ? 50 : 42;
+    }
+
     private static string FormatPlaybackSpeedButtonText(double speed)
     {
+        var format = Math.Abs(speed) is > 0d and < 1d ? "0.00" : "0.##";
         return speed switch
         {
             0d => "0",
-            > 0d => $"+{speed.ToString("0.##", CultureInfo.InvariantCulture)}x",
-            _ => $"{speed.ToString("0.##", CultureInfo.InvariantCulture)}x",
+            > 0d => $"+{speed.ToString(format, CultureInfo.InvariantCulture)}x",
+            _ => $"{speed.ToString(format, CultureInfo.InvariantCulture)}x",
         };
     }
 
